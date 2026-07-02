@@ -308,10 +308,10 @@ function renderChat() {
   input.focus();
 }
 
-function renderMessages(streamingText) {
+function renderMessages() {
   const thread = document.getElementById('thread');
   if (!thread) return;
-  if (state.messages.length === 0 && streamingText === undefined) {
+  if (state.messages.length === 0) {
     thread.innerHTML = `
       <div class="empty-state">
         <h2>お手伝いできることはありますか?</h2>
@@ -319,17 +319,33 @@ function renderMessages(streamingText) {
       </div>`;
     return;
   }
-  let html = state.messages.map((m) =>
+  thread.innerHTML = state.messages.map((m) =>
     m.role === 'user'
       ? `<div class="msg-row user"><div class="msg-user">${esc(m.content)}</div></div>`
       : `<div class="msg-row"><div class="msg-assistant"><div class="avatar">AI</div><div class="content">${renderMarkdown(m.content)}</div></div></div>`
   ).join('');
-  if (streamingText !== undefined) {
-    html += `<div class="msg-row"><div class="msg-assistant"><div class="avatar">AI</div><div class="content">${renderMarkdown(streamingText)}<span class="cursor-blink"></span></div></div></div>`;
-  }
-  thread.innerHTML = html;
+  scrollToBottom();
+}
+
+function scrollToBottom() {
   const box = document.getElementById('messages');
-  box.scrollTop = box.scrollHeight;
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
+// ストリーミング中はスレッド全体を作り直さず、末尾に追加した1要素だけを更新する
+function appendStreamingRow() {
+  const thread = document.getElementById('thread');
+  const row = document.createElement('div');
+  row.className = 'msg-row';
+  row.innerHTML = `<div class="msg-assistant"><div class="avatar">AI</div><div class="content"><span class="cursor-blink"></span></div></div>`;
+  thread.appendChild(row);
+  const content = row.querySelector('.content');
+  return {
+    update(text) {
+      content.innerHTML = renderMarkdown(text) + '<span class="cursor-blink"></span>';
+      scrollToBottom();
+    },
+  };
 }
 
 async function sendMessage() {
@@ -348,7 +364,8 @@ async function sendMessage() {
   state.streaming = true;
   document.getElementById('send').disabled = true;
   state.messages.push({ role: 'user', content: text });
-  renderMessages('');
+  renderMessages();
+  const stream = appendStreamingRow();
 
   try {
     const res = await fetch('/api/chat', {
@@ -391,11 +408,12 @@ async function sendMessage() {
         const data = JSON.parse(dataMatch[1]);
         if (ev === 'delta') {
           acc += data.text;
-          renderMessages(acc);
+          stream.update(acc);
         } else if (ev === 'done') {
           done = data;
         } else if (ev === 'error') {
           acc += `\n\n⚠️ ${data.message}`;
+          stream.update(acc);
         }
       }
     }
@@ -681,7 +699,8 @@ function renderDepts(el, d) {
 
 function renderUsers(el, d) {
   const pending = d.users.filter((u) => u.status === 'pending' && !u.disabled);
-  const activeUsers = d.users.filter((u) => u.status !== 'pending');
+  // 拒否(停止)済みの承認待ちユーザーも通常一覧に出し、再開できるようにする
+  const activeUsers = d.users.filter((u) => u.status !== 'pending' || u.disabled);
 
   const pendingPanel = pending.length === 0 ? '' : `
     <div class="panel" style="border-color:var(--warning-border);background:#fffdf5">

@@ -21,6 +21,13 @@ function monthCostJpy(departmentId) {
   return row.c;
 }
 
+function userMonthCostJpy(userId, month) {
+  return db.prepare(`
+    SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
+    WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
+  `).get(userId, month).c;
+}
+
 function deptStatus(dept) {
   const used = monthCostJpy(dept.id);
   const overBudget = used >= dept.monthly_budget_jpy;
@@ -76,6 +83,15 @@ function maybeWarnPrivateUsage(user) {
 }
 
 // ---- ユーティリティ ----
+
+// 予算入力を数値に変換する。カンマ・空白は許容し、
+// 解釈できない値は null を返す(0円への化けを防ぐ)。
+function parseBudget(value) {
+  const cleaned = String(value).replace(/[,\s円]/g, '');
+  if (cleaned === '') return null; // 空欄を0円と解釈してロックさせない
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
 
 function json(res, status, body) {
   const data = JSON.stringify(body);
@@ -216,10 +232,7 @@ async function handle(req, res, method, pathname, url) {
       'SELECT id, type, message, created_at FROM warnings WHERE user_id = ? AND acknowledged = 0 ORDER BY id DESC'
     ).all(user.id);
     const stats = privateStats(user.id, currentMonth());
-    const myCost = db.prepare(`
-      SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
-      WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
-    `).get(user.id, currentMonth()).c;
+    const myCost = userMonthCostJpy(user.id, currentMonth());
     return json(res, 200, {
       user: {
         id: user.id, username: user.username, display_name: user.display_name,
@@ -322,19 +335,25 @@ async function handleChat(req, res, user) {
   });
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-  try {
-    const result = await openai.streamChat(history, (delta) => send('delta', { text: delta }));
-
+  const saveAssistant = (content, model, promptTokens, completionTokens) => {
     db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
-      .run(conv.id, 'assistant', result.content);
+      .run(conv.id, 'assistant', content);
     db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
-
-    const cost = openai.costJpy(result.model, result.promptTokens, result.completionTokens);
+    const cost = openai.costJpy(model, promptTokens, completionTokens);
     db.prepare(`
       INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
       VALUES (?, ?, ?, 'chat', ?, ?, ?)
-    `).run(user.id, user.department_id, result.model, result.promptTokens, result.completionTokens, cost);
+    `).run(user.id, user.department_id, model, promptTokens, completionTokens, cost);
+    return cost;
+  };
 
+  let partial = '';
+  try {
+    const result = await openai.streamChat(history, (delta) => {
+      partial += delta;
+      send('delta', { text: delta });
+    });
+    const cost = saveAssistant(result.content, result.model, result.promptTokens, result.completionTokens);
     const after = getUserDept(user);
     send('done', {
       cost_jpy: cost,
@@ -342,6 +361,11 @@ async function handleChat(req, res, user) {
     });
   } catch (err) {
     console.error('[chat]', err);
+    // 途中まで生成された分も保存し、概算トークンで予算に計上する(集計漏れ防止)
+    if (partial) {
+      saveAssistant(partial, openai.CHAT_MODEL,
+        openai.estimateTokens(history), Math.ceil(partial.length / 3));
+    }
     send('error', { message: 'AI応答の取得に失敗しました。時間をおいて再度お試しください。' });
   }
   res.end();
@@ -384,10 +408,7 @@ async function handleAdmin(req, res, method, pathname) {
       FROM users u LEFT JOIN departments d ON d.id = u.department_id ORDER BY u.id
     `).all().map((u) => {
       const stats = privateStats(u.id, month);
-      const cost = db.prepare(`
-        SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
-        WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
-      `).get(u.id, month).c;
+      const cost = userMonthCostJpy(u.id, month);
       const warningCount = db.prepare(
         'SELECT COUNT(*) AS n FROM warnings WHERE user_id = ? AND month = ?'
       ).get(u.id, month).n;
@@ -409,9 +430,13 @@ async function handleAdmin(req, res, method, pathname) {
   if (method === 'POST' && pathname === '/api/admin/departments') {
     const { name, monthly_budget_jpy } = await readBody(req);
     if (!name) return json(res, 400, { error: '部署名は必須です' });
+    const budget = monthly_budget_jpy === undefined || monthly_budget_jpy === ''
+      ? 50000
+      : parseBudget(monthly_budget_jpy);
+    if (budget === null) return json(res, 400, { error: '予算は0以上の数値で入力してください' });
     try {
       const id = db.prepare('INSERT INTO departments (name, monthly_budget_jpy) VALUES (?, ?)')
-        .run(String(name), Number(monthly_budget_jpy) || 50000).lastInsertRowid;
+        .run(String(name), budget).lastInsertRowid;
       return json(res, 200, { id });
     } catch {
       return json(res, 400, { error: '同名の部署が既に存在します' });
@@ -425,8 +450,9 @@ async function handleAdmin(req, res, method, pathname) {
     if (!dept) return json(res, 404, { error: '部署が見つかりません' });
     const body = await readBody(req);
     if (body.monthly_budget_jpy !== undefined) {
-      db.prepare('UPDATE departments SET monthly_budget_jpy = ? WHERE id = ?')
-        .run(Math.max(0, Number(body.monthly_budget_jpy) || 0), id);
+      const budget = parseBudget(body.monthly_budget_jpy);
+      if (budget === null) return json(res, 400, { error: '予算は0以上の数値で入力してください' });
+      db.prepare('UPDATE departments SET monthly_budget_jpy = ? WHERE id = ?').run(budget, id);
     }
     if (body.unlock === true) {
       db.prepare('UPDATE departments SET unlock_month = ? WHERE id = ?').run(currentMonth(), id);
@@ -463,6 +489,17 @@ async function handleAdmin(req, res, method, pathname) {
     const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!target) return json(res, 404, { error: 'ユーザーが見つかりません' });
     const body = await readBody(req);
+    // 最後の有効な管理者を降格・停止すると誰も管理できなくなるため拒否する
+    const removesAdmin = target.role === 'admin' &&
+      ((body.role && body.role !== 'admin') || body.disabled === true);
+    if (removesAdmin) {
+      const others = db.prepare(
+        "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?"
+      ).get(id).n;
+      if (others === 0) {
+        return json(res, 400, { error: '最後の管理者を降格・停止することはできません。先に別の管理者を作成してください。' });
+      }
+    }
     if (body.department_id !== undefined) {
       db.prepare('UPDATE users SET department_id = ? WHERE id = ?').run(Number(body.department_id) || null, id);
     }

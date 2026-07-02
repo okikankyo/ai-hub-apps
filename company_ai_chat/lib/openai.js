@@ -154,4 +154,4 @@ function mockClassify(text) {
   return { label, model: 'mock', promptTokens: 0, completionTokens: 0 };
 }
 
-module.exports = { streamChat, classify, costJpy, CHAT_MODEL, CLASSIFIER_MODEL, MOCK, USD_JPY };
+module.exports = { streamChat, classify, costJpy, estimateTokens, CHAT_MODEL, CLASSIFIER_MODEL, MOCK, USD_JPY };
