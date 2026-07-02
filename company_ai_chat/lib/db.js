@@ -102,6 +102,10 @@ db.exec(`
     db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL');
+
+  // 応答に使ったモデルの記録(ルーティング結果の表示用)
+  const msgCols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+  if (!msgCols.includes('model')) db.exec('ALTER TABLE messages ADD COLUMN model TEXT');
 }
 
 function hashPassword(password) {
@@ -143,4 +147,4 @@ function seed() {
 
 seed();
 
-module.exports = { db, hashPassword, verifyPassword, currentMonth };
+module.exports = { db, hashPassword, verifyPassword, currentMonth, DATA_DIR };

@@ -2,6 +2,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { db, hashPassword, currentMonth } = require('./db');
 const auth = require('./auth');
 const openai = require('./openai');
@@ -277,7 +279,7 @@ async function handle(req, res, method, pathname, url) {
     if (!conv) return json(res, 404, { error: '会話が見つかりません' });
     if (method === 'GET' && convMatch[2]) {
       const rows = db.prepare(
-        'SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id'
+        'SELECT id, role, content, model, created_at FROM messages WHERE conversation_id = ? ORDER BY id'
       ).all(convId);
       return json(res, 200, rows);
     }
@@ -292,12 +294,30 @@ async function handle(req, res, method, pathname, url) {
     return handleChat(req, res, user);
   }
 
+  // 生成画像の配信(ログイン必須、ファイル名はランダムhexのみ許可)
+  const fileMatch = pathname.match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg))$/);
+  if (method === 'GET' && fileMatch) {
+    const filePath = path.join(openai.IMAGES_DIR, fileMatch[1]);
+    let data;
+    try {
+      data = fs.readFileSync(filePath);
+    } catch {
+      return json(res, 404, { error: 'not found' });
+    }
+    res.writeHead(200, {
+      'Content-Type': fileMatch[1].endsWith('.png') ? 'image/png' : 'image/svg+xml',
+      'Cache-Control': 'private, max-age=86400',
+    });
+    res.end(data);
+    return true;
+  }
+
   json(res, 404, { error: 'not found' });
   return true;
 }
 
 async function handleChat(req, res, user) {
-  const { conversation_id, message } = await readBody(req);
+  const { conversation_id, message, confirmed, model_pref } = await readBody(req);
   const text = String(message || '').trim();
   if (!text) return json(res, 400, { error: 'メッセージが空です' });
 
@@ -313,6 +333,31 @@ async function handleChat(req, res, user) {
       error: `部署「${dept.name}」の今月の予算(${Math.round(dept.monthly_budget_jpy).toLocaleString()}円)を超過したためロックされています。管理者に解除を依頼してください。`,
       locked: true,
     });
+  }
+
+  // ルーティング: 内容に応じてモデルを自動選択
+  let route;
+  if (confirmed === true) {
+    // sensitive の人間確認済み → 高性能モデルで実行(再分類しない)
+    route = { category: 'sensitive', model: openai.HEAVY_MODEL, promptTokens: 0, completionTokens: 0 };
+  } else if (model_pref === 'light') {
+    route = { category: 'light', model: openai.LIGHT_MODEL, promptTokens: 0, completionTokens: 0 };
+  } else if (model_pref === 'heavy') {
+    route = { category: 'heavy', model: openai.HEAVY_MODEL, promptTokens: 0, completionTokens: 0 };
+  } else {
+    route = await openai.routeMessage(text);
+  }
+  if (route.promptTokens || route.completionTokens) {
+    const cost = openai.costJpy(openai.CLASSIFIER_MODEL, route.promptTokens, route.completionTokens);
+    db.prepare(`
+      INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
+      VALUES (?, ?, ?, 'classify', ?, ?, ?)
+    `).run(user.id, user.department_id, openai.CLASSIFIER_MODEL, route.promptTokens, route.completionTokens, cost);
+  }
+
+  // 送信・削除・金額・個人情報が絡むものは実行前に人間確認を求める
+  if (route.category === 'sensitive' && confirmed !== true) {
+    return json(res, 200, { needs_confirmation: true, category: 'sensitive' });
   }
 
   // ユーザー発言を保存し、初回ならタイトルに反映
@@ -335,11 +380,11 @@ async function handleChat(req, res, user) {
   });
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-  const saveAssistant = (content, model, promptTokens, completionTokens) => {
-    db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
-      .run(conv.id, 'assistant', content);
+  const saveAssistant = (content, model, promptTokens, completionTokens, fixedCostJpy) => {
+    db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
+      .run(conv.id, 'assistant', content, model);
     db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
-    const cost = openai.costJpy(model, promptTokens, completionTokens);
+    const cost = fixedCostJpy !== undefined ? fixedCostJpy : openai.costJpy(model, promptTokens, completionTokens);
     db.prepare(`
       INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
       VALUES (?, ?, ?, 'chat', ?, ?, ?)
@@ -347,23 +392,47 @@ async function handleChat(req, res, user) {
     return cost;
   };
 
+  const sendDone = (cost, model) => {
+    const after = getUserDept(user);
+    send('done', {
+      cost_jpy: cost,
+      model,
+      category: route.category,
+      dept: after && { used_jpy: after.used_jpy, budget: after.monthly_budget_jpy, locked: after.locked, ratio: after.ratio },
+    });
+  };
+
+  if (route.category === 'image') {
+    // 画像生成(ストリーミングなし)
+    try {
+      send('delta', { text: '🎨 画像を生成しています…' });
+      const img = await openai.generateImage(text);
+      const content = `![生成画像](/api/files/${img.file})`;
+      const cost = saveAssistant(content, img.model, 0, 0, img.costJpy);
+      send('replace', { text: content });
+      sendDone(cost, img.model);
+    } catch (err) {
+      console.error('[image]', err);
+      send('error', { message: '画像の生成に失敗しました。時間をおいて再度お試しください。' });
+    }
+    res.end();
+    classifyAsync(user, text);
+    return true;
+  }
+
   let partial = '';
   try {
     const result = await openai.streamChat(history, (delta) => {
       partial += delta;
       send('delta', { text: delta });
-    });
+    }, route.model);
     const cost = saveAssistant(result.content, result.model, result.promptTokens, result.completionTokens);
-    const after = getUserDept(user);
-    send('done', {
-      cost_jpy: cost,
-      dept: after && { used_jpy: after.used_jpy, budget: after.monthly_budget_jpy, locked: after.locked, ratio: after.ratio },
-    });
+    sendDone(cost, result.model);
   } catch (err) {
     console.error('[chat]', err);
     // 途中まで生成された分も保存し、概算トークンで予算に計上する(集計漏れ防止)
     if (partial) {
-      saveAssistant(partial, openai.CHAT_MODEL,
+      saveAssistant(partial, route.model,
         openai.estimateTokens(history), Math.ceil(partial.length / 3));
     }
     send('error', { message: 'AI応答の取得に失敗しました。時間をおいて再度お試しください。' });

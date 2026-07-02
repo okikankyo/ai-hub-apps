@@ -12,6 +12,7 @@ const state = {
   view: 'chat',      // 'chat' | 'admin'
   adminTab: 'dashboard',
   adminData: null,
+  modelPref: 'auto', // 'auto' | 'light' | 'heavy'
 };
 
 // ---------- ユーティリティ ----------
@@ -47,6 +48,9 @@ function renderMarkdown(text) {
       html += `<pre><code>${esc(body)}</code></pre>`;
     } else {
       let t = esc(parts[i]);
+      // 生成画像(自サーバー配信のパスのみ許可)
+      t = t.replace(/!\[([^\]]*)\]\((\/api\/files\/[\w.-]+)\)/g,
+        '<img src="$2" alt="$1" class="gen-image" loading="lazy">');
       t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
       t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
       t = t.replace(/^### (.+)$/gm, '<strong>$1</strong>');
@@ -272,10 +276,15 @@ function renderChat() {
     <div class="messages" id="messages"><div class="thread" id="thread"></div></div>
     <div class="composer-wrap">
       <div class="composer">
+        <select id="model-pref" class="model-pref" title="使用モデル">
+          <option value="auto">🪄 自動</option>
+          <option value="light">⚡ 軽量</option>
+          <option value="heavy">🧠 高性能</option>
+        </select>
         <textarea id="input" rows="1" placeholder="メッセージを入力…(Shift+Enterで改行)"></textarea>
         <button class="send" id="send" title="送信">↑</button>
       </div>
-      <div class="composer-note">利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
+      <div class="composer-note">「自動」では内容に応じて最適なモデルに振り分けます。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
     </div>`}
   `;
 
@@ -305,6 +314,9 @@ function renderChat() {
     }
   });
   sendBtn.onclick = sendMessage;
+  const modelPref = document.getElementById('model-pref');
+  modelPref.value = state.modelPref;
+  modelPref.onchange = () => { state.modelPref = modelPref.value; };
   input.focus();
 }
 
@@ -322,7 +334,9 @@ function renderMessages() {
   thread.innerHTML = state.messages.map((m) =>
     m.role === 'user'
       ? `<div class="msg-row user"><div class="msg-user">${esc(m.content)}</div></div>`
-      : `<div class="msg-row"><div class="msg-assistant"><div class="avatar">AI</div><div class="content">${renderMarkdown(m.content)}</div></div></div>`
+      : `<div class="msg-row"><div class="msg-assistant"><div class="avatar">AI</div><div class="content">${renderMarkdown(m.content)}${
+          m.model ? `<div class="msg-model">${esc(m.model)}</div>` : ''
+        }</div></div></div>`
   ).join('');
   scrollToBottom();
 }
@@ -345,6 +359,9 @@ function appendStreamingRow() {
       content.innerHTML = renderMarkdown(text) + '<span class="cursor-blink"></span>';
       scrollToBottom();
     },
+    remove() {
+      row.remove();
+    },
   };
 }
 
@@ -361,28 +378,40 @@ async function sendMessage() {
 
   input.value = '';
   input.style.height = 'auto';
-  state.streaming = true;
-  document.getElementById('send').disabled = true;
   state.messages.push({ role: 'user', content: text });
   renderMessages();
+  await executeChat(text, false);
+}
+
+async function executeChat(text, confirmed) {
+  state.streaming = true;
+  const sendBtn = document.getElementById('send');
+  if (sendBtn) sendBtn.disabled = true;
   const stream = appendStreamingRow();
+  let refreshAfter = true; // 確認ダイアログ表示時は画面を作り直さない
 
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation_id: state.currentConvId, message: text }),
+      body: JSON.stringify({
+        conversation_id: state.currentConvId,
+        message: text,
+        confirmed,
+        model_pref: state.modelPref,
+      }),
     });
 
-    if (!res.ok) {
+    // JSON 応答 = ストリーミング以外(エラー or 人間確認の要求)
+    if ((res.headers.get('content-type') || '').includes('application/json')) {
       const data = await res.json().catch(() => ({}));
-      state.messages.push({ role: 'assistant', content: `⚠️ ${data.error || '送信に失敗しました'}` });
-      if (data.locked) {
-        await loadMe();
-        await loadConversations();
-        render();
+      stream.remove();
+      if (data.needs_confirmation) {
+        refreshAfter = false;
+        showConfirmCard(text);
         return;
       }
+      state.messages.push({ role: 'assistant', content: `⚠️ ${data.error || '送信に失敗しました'}` });
       renderMessages();
       return;
     }
@@ -409,6 +438,9 @@ async function sendMessage() {
         if (ev === 'delta') {
           acc += data.text;
           stream.update(acc);
+        } else if (ev === 'replace') {
+          acc = data.text; // 画像生成完了時など、進捗表示を最終結果で置き換える
+          stream.update(acc);
         } else if (ev === 'done') {
           done = data;
         } else if (ev === 'error') {
@@ -417,19 +449,48 @@ async function sendMessage() {
         }
       }
     }
-    state.messages.push({ role: 'assistant', content: acc });
+    state.messages.push({ role: 'assistant', content: acc, model: done?.model });
     renderMessages();
-    void done;
   } catch (err) {
     state.messages.push({ role: 'assistant', content: `⚠️ 通信エラー: ${err.message}` });
     renderMessages();
   } finally {
     state.streaming = false;
-    // 予算メーター・タイトル・警告を最新化(画面全体を再描画)
-    await loadMe();
-    await loadConversations();
-    render();
+    if (refreshAfter) {
+      // 予算メーター・タイトル・警告を最新化(画面全体を再描画)
+      await loadMe();
+      await loadConversations();
+      render();
+    } else if (sendBtn) {
+      sendBtn.disabled = false;
+    }
   }
+}
+
+// sensitive 判定時の実行前確認カード
+function showConfirmCard(text) {
+  const thread = document.getElementById('thread');
+  const card = document.createElement('div');
+  card.className = 'confirm-card';
+  card.innerHTML = `
+    <div class="confirm-title">⚠️ 実行前の確認</div>
+    <p>この依頼は<strong>送信・削除・金額・個人情報</strong>のいずれかに関わる可能性があると判定されました。<br>
+    高性能モデルで慎重に処理しますが、内容を確認のうえ続行してください。</p>
+    <div class="confirm-actions">
+      <button class="btn-primary" data-proceed>確認して続行</button>
+      <button class="btn-ghost" data-cancel>キャンセル</button>
+    </div>`;
+  thread.appendChild(card);
+  scrollToBottom();
+  card.querySelector('[data-proceed]').onclick = () => {
+    card.remove();
+    executeChat(text, true);
+  };
+  card.querySelector('[data-cancel]').onclick = () => {
+    card.remove();
+    state.messages.pop(); // 未送信のユーザー発言を取り消す
+    renderMessages();
+  };
 }
 
 // ---------- 管理画面 ----------
