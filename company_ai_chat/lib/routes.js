@@ -1,0 +1,422 @@
+// API ルートハンドラ
+'use strict';
+
+const { db, hashPassword, currentMonth } = require('./db');
+const auth = require('./auth');
+const openai = require('./openai');
+
+const PRIVATE_RATIO_WARN = Number(process.env.PRIVATE_RATIO_WARN || 0.3); // 警告する私的利用率
+const PRIVATE_MIN_COUNT = Number(process.env.PRIVATE_MIN_COUNT || 5);     // 警告に必要な最低判定数
+const BUDGET_ALERT_RATIO = 0.8;                                           // 予算アラート閾値
+
+// ---- 予算・ロック関連 ----
+
+function monthCostJpy(departmentId) {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
+    WHERE department_id = ? AND strftime('%Y-%m', created_at) = ?
+  `).get(departmentId, currentMonth());
+  return row.c;
+}
+
+function deptStatus(dept) {
+  const used = monthCostJpy(dept.id);
+  const overBudget = used >= dept.monthly_budget_jpy;
+  const unlocked = dept.unlock_month === currentMonth();
+  return {
+    id: dept.id,
+    name: dept.name,
+    monthly_budget_jpy: dept.monthly_budget_jpy,
+    used_jpy: used,
+    ratio: dept.monthly_budget_jpy > 0 ? used / dept.monthly_budget_jpy : 0,
+    locked: overBudget && !unlocked,
+    over_budget: overBudget,
+    unlocked_by_admin: unlocked,
+  };
+}
+
+function getUserDept(user) {
+  if (!user.department_id) return null;
+  const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(user.department_id);
+  return dept ? deptStatus(dept) : null;
+}
+
+// ---- 私的利用の集計・警告 ----
+
+function privateStats(userId, month) {
+  const rows = db.prepare(`
+    SELECT label, COUNT(*) AS n FROM classifications
+    WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
+    GROUP BY label
+  `).all(userId, month);
+  const counts = { work: 0, private: 0, unknown: 0 };
+  for (const r of rows) counts[r.label] = r.n;
+  const judged = counts.work + counts.private;
+  return { ...counts, judged, private_ratio: judged > 0 ? counts.private / judged : 0 };
+}
+
+// 分類のたびに呼ぶ。閾値超過なら同月1回だけ自動警告を作成する。
+function maybeWarnPrivateUsage(user) {
+  const month = currentMonth();
+  const stats = privateStats(user.id, month);
+  if (stats.judged < PRIVATE_MIN_COUNT || stats.private_ratio < PRIVATE_RATIO_WARN) return;
+  const exists = db.prepare(
+    "SELECT 1 FROM warnings WHERE user_id = ? AND type = 'private_ratio' AND month = ?"
+  ).get(user.id, month);
+  if (exists) return;
+  db.prepare('INSERT INTO warnings (user_id, type, message, month) VALUES (?, ?, ?, ?)').run(
+    user.id,
+    'private_ratio',
+    `今月の利用のうち私的利用と判定された割合が ${Math.round(stats.private_ratio * 100)}% に達しています。` +
+      '本ツールは業務目的での利用をお願いします。',
+    month
+  );
+}
+
+// ---- ユーティリティ ----
+
+function json(res, status, body) {
+  const data = JSON.stringify(body);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(data);
+  return true; // handle() の「処理済み」戻り値としてそのまま返せるようにする
+}
+
+async function readBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > 1_000_000) throw new Error('body too large');
+    chunks.push(c);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function requireUser(req, res) {
+  const user = auth.getUser(req);
+  if (!user) {
+    json(res, 401, { error: 'ログインしてください' });
+    return null;
+  }
+  return user;
+}
+
+function requireAdmin(req, res) {
+  const user = requireUser(req, res);
+  if (!user) return null;
+  if (user.role !== 'admin') {
+    json(res, 403, { error: '管理者権限が必要です' });
+    return null;
+  }
+  return user;
+}
+
+// ---- ルーティング本体 ----
+
+// handle(req, res, method, pathname) → true なら処理済み
+async function handle(req, res, method, pathname) {
+  // 認証
+  if (method === 'POST' && pathname === '/api/login') {
+    const { username, password } = await readBody(req);
+    const result = auth.login(String(username || ''), String(password || ''));
+    if (!result) return json(res, 401, { error: 'ユーザー名またはパスワードが違います' });
+    res.setHeader('Set-Cookie', auth.sessionCookie(result.token));
+    return json(res, 200, { ok: true });
+  }
+  if (method === 'POST' && pathname === '/api/logout') {
+    auth.logout(auth.parseCookies(req).session);
+    res.setHeader('Set-Cookie', auth.clearCookie());
+    return json(res, 200, { ok: true });
+  }
+
+  if (!pathname.startsWith('/api/')) return false;
+
+  // ここから先は要ログイン
+  if (pathname.startsWith('/api/admin/')) return handleAdmin(req, res, method, pathname);
+
+  const user = requireUser(req, res);
+  if (!user) return true;
+
+  if (method === 'GET' && pathname === '/api/me') {
+    const dept = getUserDept(user);
+    const warnings = db.prepare(
+      'SELECT id, type, message, created_at FROM warnings WHERE user_id = ? AND acknowledged = 0 ORDER BY id DESC'
+    ).all(user.id);
+    const stats = privateStats(user.id, currentMonth());
+    const myCost = db.prepare(`
+      SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
+      WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
+    `).get(user.id, currentMonth()).c;
+    return json(res, 200, {
+      user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
+      department: dept,
+      warnings,
+      my_month_cost_jpy: myCost,
+      my_private_stats: stats,
+      mock_mode: openai.MOCK,
+      budget_alert: dept && !dept.locked && dept.ratio >= BUDGET_ALERT_RATIO,
+    });
+  }
+
+  if (method === 'POST' && pathname.startsWith('/api/warnings/') && pathname.endsWith('/ack')) {
+    const id = Number(pathname.split('/')[3]);
+    db.prepare('UPDATE warnings SET acknowledged = 1 WHERE id = ? AND user_id = ?').run(id, user.id);
+    return json(res, 200, { ok: true });
+  }
+
+  // 会話
+  if (method === 'GET' && pathname === '/api/conversations') {
+    const rows = db.prepare(
+      'SELECT id, title, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC'
+    ).all(user.id);
+    return json(res, 200, rows);
+  }
+  if (method === 'POST' && pathname === '/api/conversations') {
+    const id = db.prepare('INSERT INTO conversations (user_id) VALUES (?)').run(user.id).lastInsertRowid;
+    return json(res, 200, { id });
+  }
+
+  const convMatch = pathname.match(/^\/api\/conversations\/(\d+)(\/messages)?$/);
+  if (convMatch) {
+    const convId = Number(convMatch[1]);
+    const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(convId, user.id);
+    if (!conv) return json(res, 404, { error: '会話が見つかりません' });
+    if (method === 'GET' && convMatch[2]) {
+      const rows = db.prepare(
+        'SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY id'
+      ).all(convId);
+      return json(res, 200, rows);
+    }
+    if (method === 'DELETE' && !convMatch[2]) {
+      db.prepare('DELETE FROM conversations WHERE id = ?').run(convId);
+      return json(res, 200, { ok: true });
+    }
+  }
+
+  // チャット送信 (SSE ストリーミング)
+  if (method === 'POST' && pathname === '/api/chat') {
+    return handleChat(req, res, user);
+  }
+
+  json(res, 404, { error: 'not found' });
+  return true;
+}
+
+async function handleChat(req, res, user) {
+  const { conversation_id, message } = await readBody(req);
+  const text = String(message || '').trim();
+  if (!text) return json(res, 400, { error: 'メッセージが空です' });
+
+  const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
+    .get(Number(conversation_id), user.id);
+  if (!conv) return json(res, 404, { error: '会話が見つかりません' });
+
+  // 予算ロック確認
+  const dept = getUserDept(user);
+  if (!dept) return json(res, 400, { error: '部署が設定されていません。管理者に連絡してください。' });
+  if (dept.locked) {
+    return json(res, 403, {
+      error: `部署「${dept.name}」の今月の予算(${Math.round(dept.monthly_budget_jpy).toLocaleString()}円)を超過したためロックされています。管理者に解除を依頼してください。`,
+      locked: true,
+    });
+  }
+
+  // ユーザー発言を保存し、初回ならタイトルに反映
+  db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)').run(conv.id, 'user', text);
+  const msgCount = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id).n;
+  if (msgCount === 1) {
+    db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.slice(0, 30), conv.id);
+  }
+
+  const history = db.prepare(
+    'SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 20'
+  ).all(conv.id).reverse();
+
+  // SSE 開始
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+  try {
+    const result = await openai.streamChat(history, (delta) => send('delta', { text: delta }));
+
+    db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
+      .run(conv.id, 'assistant', result.content);
+    db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
+
+    const cost = openai.costJpy(result.model, result.promptTokens, result.completionTokens);
+    db.prepare(`
+      INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
+      VALUES (?, ?, ?, 'chat', ?, ?, ?)
+    `).run(user.id, user.department_id, result.model, result.promptTokens, result.completionTokens, cost);
+
+    const after = getUserDept(user);
+    send('done', {
+      cost_jpy: cost,
+      dept: after && { used_jpy: after.used_jpy, budget: after.monthly_budget_jpy, locked: after.locked, ratio: after.ratio },
+    });
+  } catch (err) {
+    console.error('[chat]', err);
+    send('error', { message: 'AI応答の取得に失敗しました。時間をおいて再度お試しください。' });
+  }
+  res.end();
+
+  // 仕事/プライベート判定は応答と切り離して非同期実行(ラベルのみ保存)
+  classifyAsync(user, text);
+  return true;
+}
+
+async function classifyAsync(user, text) {
+  try {
+    const r = await openai.classify(text);
+    db.prepare('INSERT INTO classifications (user_id, department_id, label) VALUES (?, ?, ?)')
+      .run(user.id, user.department_id, r.label);
+    if (r.promptTokens || r.completionTokens) {
+      const cost = openai.costJpy(r.model, r.promptTokens, r.completionTokens);
+      db.prepare(`
+        INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
+        VALUES (?, ?, ?, 'classify', ?, ?, ?)
+      `).run(user.id, user.department_id, r.model, r.promptTokens, r.completionTokens, cost);
+    }
+    maybeWarnPrivateUsage(user);
+  } catch (err) {
+    console.error('[classifyAsync]', err.message);
+  }
+}
+
+// ---- 管理者 API ----
+
+async function handleAdmin(req, res, method, pathname) {
+  const admin = requireAdmin(req, res);
+  if (!admin) return true;
+
+  if (method === 'GET' && pathname === '/api/admin/overview') {
+    const month = currentMonth();
+    const departments = db.prepare('SELECT * FROM departments ORDER BY id').all().map(deptStatus);
+    const users = db.prepare(`
+      SELECT u.id, u.username, u.display_name, u.role, u.disabled, u.department_id, d.name AS department_name
+      FROM users u LEFT JOIN departments d ON d.id = u.department_id ORDER BY u.id
+    `).all().map((u) => {
+      const stats = privateStats(u.id, month);
+      const cost = db.prepare(`
+        SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
+        WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
+      `).get(u.id, month).c;
+      const warningCount = db.prepare(
+        'SELECT COUNT(*) AS n FROM warnings WHERE user_id = ? AND month = ?'
+      ).get(u.id, month).n;
+      return { ...u, month_cost_jpy: cost, stats, warning_count: warningCount };
+    });
+    const daily = db.prepare(`
+      SELECT date(created_at) AS day, COALESCE(SUM(cost_jpy), 0) AS cost
+      FROM usage_log
+      WHERE created_at >= date('now', 'localtime', '-29 days')
+      GROUP BY day ORDER BY day
+    `).all();
+    const recentWarnings = db.prepare(`
+      SELECT w.*, u.display_name FROM warnings w JOIN users u ON u.id = w.user_id
+      ORDER BY w.id DESC LIMIT 50
+    `).all();
+    return json(res, 200, { month, departments, users, daily, warnings: recentWarnings });
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/departments') {
+    const { name, monthly_budget_jpy } = await readBody(req);
+    if (!name) return json(res, 400, { error: '部署名は必須です' });
+    try {
+      const id = db.prepare('INSERT INTO departments (name, monthly_budget_jpy) VALUES (?, ?)')
+        .run(String(name), Number(monthly_budget_jpy) || 50000).lastInsertRowid;
+      return json(res, 200, { id });
+    } catch {
+      return json(res, 400, { error: '同名の部署が既に存在します' });
+    }
+  }
+
+  const deptMatch = pathname.match(/^\/api\/admin\/departments\/(\d+)$/);
+  if (method === 'PATCH' && deptMatch) {
+    const id = Number(deptMatch[1]);
+    const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
+    if (!dept) return json(res, 404, { error: '部署が見つかりません' });
+    const body = await readBody(req);
+    if (body.monthly_budget_jpy !== undefined) {
+      db.prepare('UPDATE departments SET monthly_budget_jpy = ? WHERE id = ?')
+        .run(Math.max(0, Number(body.monthly_budget_jpy) || 0), id);
+    }
+    if (body.unlock === true) {
+      db.prepare('UPDATE departments SET unlock_month = ? WHERE id = ?').run(currentMonth(), id);
+    }
+    if (body.unlock === false) {
+      db.prepare('UPDATE departments SET unlock_month = NULL WHERE id = ?').run(id);
+    }
+    return json(res, 200, deptStatus(db.prepare('SELECT * FROM departments WHERE id = ?').get(id)));
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/users') {
+    const { username, display_name, password, role, department_id } = await readBody(req);
+    if (!username || !password) return json(res, 400, { error: 'ユーザー名とパスワードは必須です' });
+    try {
+      const id = db.prepare(`
+        INSERT INTO users (username, display_name, password_hash, role, department_id)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        String(username),
+        String(display_name || username),
+        hashPassword(String(password)),
+        role === 'admin' ? 'admin' : 'user',
+        Number(department_id) || null
+      ).lastInsertRowid;
+      return json(res, 200, { id });
+    } catch {
+      return json(res, 400, { error: '同名のユーザーが既に存在します' });
+    }
+  }
+
+  const userMatch = pathname.match(/^\/api\/admin\/users\/(\d+)$/);
+  if (method === 'PATCH' && userMatch) {
+    const id = Number(userMatch[1]);
+    const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    if (!target) return json(res, 404, { error: 'ユーザーが見つかりません' });
+    const body = await readBody(req);
+    if (body.department_id !== undefined) {
+      db.prepare('UPDATE users SET department_id = ? WHERE id = ?').run(Number(body.department_id) || null, id);
+    }
+    if (body.role) {
+      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(body.role === 'admin' ? 'admin' : 'user', id);
+    }
+    if (body.disabled !== undefined) {
+      db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(body.disabled ? 1 : 0, id);
+    }
+    if (body.password) {
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.password)), id);
+    }
+    return json(res, 200, { ok: true });
+  }
+
+  // 管理者からの手動警告
+  const warnMatch = pathname.match(/^\/api\/admin\/users\/(\d+)\/warn$/);
+  if (method === 'POST' && warnMatch) {
+    const id = Number(warnMatch[1]);
+    const { message } = await readBody(req);
+    db.prepare('INSERT INTO warnings (user_id, type, message, month) VALUES (?, ?, ?, ?)').run(
+      id,
+      'manual',
+      String(message || '管理者から利用方法について注意があります。'),
+      currentMonth()
+    );
+    return json(res, 200, { ok: true });
+  }
+
+  json(res, 404, { error: 'not found' });
+  return true;
+}
+
+module.exports = { handle };
