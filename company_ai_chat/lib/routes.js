@@ -1,9 +1,11 @@
 // API ルートハンドラ
 'use strict';
 
+const crypto = require('node:crypto');
 const { db, hashPassword, currentMonth } = require('./db');
 const auth = require('./auth');
 const openai = require('./openai');
+const google = require('./google_auth');
 
 const PRIVATE_RATIO_WARN = Number(process.env.PRIVATE_RATIO_WARN || 0.3); // 警告する私的利用率
 const PRIVATE_MIN_COUNT = Number(process.env.PRIVATE_MIN_COUNT || 5);     // 警告に必要な最低判定数
@@ -116,10 +118,71 @@ function requireAdmin(req, res) {
   return user;
 }
 
+// ---- Google ログイン ----
+
+function redirect(res, location, extraCookie) {
+  const headers = { Location: location };
+  if (extraCookie) headers['Set-Cookie'] = extraCookie;
+  res.writeHead(302, headers);
+  res.end();
+  return true;
+}
+
+function handleGoogleStart(req, res) {
+  if (!google.ENABLED) {
+    return redirect(res, '/?login_error=' + encodeURIComponent('Googleログインが未設定です(GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET)'));
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  return redirect(res, google.authUrl(state),
+    `oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600`);
+}
+
+async function handleGoogleCallback(req, res, url) {
+  const fail = (msg) => redirect(res, '/?login_error=' + encodeURIComponent(msg),
+    'oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+  try {
+    const state = url.searchParams.get('state');
+    const code = url.searchParams.get('code');
+    if (!code || !state || state !== auth.parseCookies(req).oauth_state) {
+      return fail('Googleログインに失敗しました(state不一致)。もう一度お試しください。');
+    }
+    const profile = await google.exchangeCode(code);
+
+    // google_sub → email の順で既存ユーザーを探し、なければ承認待ちで新規作成
+    let user = db.prepare('SELECT * FROM users WHERE google_sub = ?').get(profile.sub);
+    if (!user) {
+      user = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?').get(profile.email, profile.email);
+      if (user) db.prepare('UPDATE users SET google_sub = ?, email = ? WHERE id = ?').run(profile.sub, profile.email, user.id);
+    }
+    if (!user) {
+      const id = db.prepare(`
+        INSERT INTO users (username, display_name, password_hash, role, department_id, google_sub, email, status)
+        VALUES (?, ?, '', 'user', NULL, ?, ?, 'pending')
+      `).run(profile.email, profile.name, profile.sub, profile.email).lastInsertRowid;
+      user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+      console.log(`[auth] Google 新規ユーザー(承認待ち): ${profile.email}`);
+    }
+    if (user.disabled) return fail('このアカウントは停止されています。管理者にお問い合わせください。');
+
+    const token = auth.createSession(user.id);
+    res.setHeader('Set-Cookie', [
+      auth.sessionCookie(token),
+      'oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
+    ]);
+    return redirect(res, '/');
+  } catch (err) {
+    console.error('[google auth]', err.message);
+    return fail('Googleログインに失敗しました。もう一度お試しください。');
+  }
+}
+
 // ---- ルーティング本体 ----
 
 // handle(req, res, method, pathname) → true なら処理済み
-async function handle(req, res, method, pathname) {
+async function handle(req, res, method, pathname, url) {
+  if (method === 'GET' && pathname === '/auth/google') return handleGoogleStart(req, res);
+  if (method === 'GET' && pathname === '/auth/google/callback') return handleGoogleCallback(req, res, url);
+
   // 認証
   if (method === 'POST' && pathname === '/api/login') {
     const { username, password } = await readBody(req);
@@ -132,6 +195,11 @@ async function handle(req, res, method, pathname) {
     auth.logout(auth.parseCookies(req).session);
     res.setHeader('Set-Cookie', auth.clearCookie());
     return json(res, 200, { ok: true });
+  }
+
+  // ログイン画面用の公開設定
+  if (method === 'GET' && pathname === '/api/config') {
+    return json(res, 200, { google_enabled: google.ENABLED });
   }
 
   if (!pathname.startsWith('/api/')) return false;
@@ -153,7 +221,10 @@ async function handle(req, res, method, pathname) {
       WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
     `).get(user.id, currentMonth()).c;
     return json(res, 200, {
-      user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role },
+      user: {
+        id: user.id, username: user.username, display_name: user.display_name,
+        role: user.role, status: user.status, email: user.email,
+      },
       department: dept,
       warnings,
       my_month_cost_jpy: myCost,
@@ -167,6 +238,11 @@ async function handle(req, res, method, pathname) {
     const id = Number(pathname.split('/')[3]);
     db.prepare('UPDATE warnings SET acknowledged = 1 WHERE id = ? AND user_id = ?').run(id, user.id);
     return json(res, 200, { ok: true });
+  }
+
+  // ここから先(会話・チャット)は承認済みユーザーのみ
+  if (user.status === 'pending') {
+    return json(res, 403, { error: 'アカウントは管理者の承認待ちです。承認されるまでお待ちください。', pending: true });
   }
 
   // 会話
@@ -303,7 +379,8 @@ async function handleAdmin(req, res, method, pathname) {
     const month = currentMonth();
     const departments = db.prepare('SELECT * FROM departments ORDER BY id').all().map(deptStatus);
     const users = db.prepare(`
-      SELECT u.id, u.username, u.display_name, u.role, u.disabled, u.department_id, d.name AS department_name
+      SELECT u.id, u.username, u.display_name, u.role, u.disabled, u.department_id, u.created_at,
+             u.email, u.status, (u.google_sub IS NOT NULL) AS is_google, d.name AS department_name
       FROM users u LEFT JOIN departments d ON d.id = u.department_id ORDER BY u.id
     `).all().map((u) => {
       const stats = privateStats(u.id, month);
@@ -394,6 +471,11 @@ async function handleAdmin(req, res, method, pathname) {
     }
     if (body.disabled !== undefined) {
       db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(body.disabled ? 1 : 0, id);
+      if (body.disabled) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+    }
+    // 承認: status を active にする(通常は department_id とセットで送られる)
+    if (body.status === 'active' || body.status === 'pending') {
+      db.prepare('UPDATE users SET status = ? WHERE id = ?').run(body.status, id);
     }
     if (body.password) {
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.password)), id);

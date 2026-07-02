@@ -70,6 +70,10 @@ async function loadMe() {
 
 async function init() {
   if (await loadMe()) {
+    if (state.me.user.status === 'pending') {
+      renderPending();
+      return;
+    }
     await loadConversations();
     render();
   } else {
@@ -77,22 +81,55 @@ async function init() {
   }
 }
 
+// Google ログイン直後の未承認ユーザー向け画面
+function renderPending() {
+  const me = state.me;
+  $app.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card" style="text-align:center">
+        <div style="font-size:40px">⏳</div>
+        <h1 style="font-size:19px">承認待ちです</h1>
+        <p style="color:var(--ink-2);font-size:13.5px;line-height:1.8">
+          ${esc(me.user.display_name)} さん(${esc(me.user.email || me.user.username)})のアカウントは作成されました。<br>
+          管理者が部署を割り当てて承認すると利用できるようになります。
+        </p>
+        <button class="btn-ghost" id="btn-logout" style="margin-top:10px">ログアウト</button>
+      </div>
+    </div>`;
+  document.getElementById('btn-logout').onclick = async () => {
+    await api('/api/logout', { method: 'POST' });
+    location.reload();
+  };
+}
+
 // ---------- ログイン ----------
 
-function renderLogin() {
+async function renderLogin() {
+  let config = { google_enabled: false };
+  try { config = await api('/api/config'); } catch { /* 既定値のまま */ }
+  const loginError = new URLSearchParams(location.search).get('login_error') || '';
+
   $app.innerHTML = `
     <div class="login-wrap">
       <form class="login-card" id="login-form">
         <h1>💬 社内AIチャット</h1>
-        <div class="sub">社内アカウントでログインしてください</div>
+        <div class="sub">アカウントでログインしてください</div>
+        ${config.google_enabled ? `
+        <a class="btn-google" href="/auth/google">
+          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+          Google でログイン
+        </a>
+        <div class="login-note">初めての方は Google ログイン後、管理者の承認をお待ちください。</div>
+        <div class="divider"><span>または</span></div>` : ''}
         <label>ユーザー名</label>
-        <input name="username" autocomplete="username" required autofocus>
+        <input name="username" autocomplete="username" required ${config.google_enabled ? '' : 'autofocus'}>
         <label>パスワード</label>
         <input name="password" type="password" autocomplete="current-password" required>
         <button class="btn-primary" type="submit">ログイン</button>
-        <div class="login-error" id="login-error"></div>
+        <div class="login-error" id="login-error">${esc(loginError)}</div>
       </form>
     </div>`;
+  if (loginError) history.replaceState(null, '', '/');
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -643,14 +680,39 @@ function renderDepts(el, d) {
 // --- ユーザータブ ---
 
 function renderUsers(el, d) {
-  el.innerHTML = `
+  const pending = d.users.filter((u) => u.status === 'pending' && !u.disabled);
+  const activeUsers = d.users.filter((u) => u.status !== 'pending');
+
+  const pendingPanel = pending.length === 0 ? '' : `
+    <div class="panel" style="border-color:var(--warning-border);background:#fffdf5">
+      <h3>🔔 承認待ちのユーザー(${pending.length}名)</h3>
+      <p class="desc">Googleログインで新規登録されたユーザーです。部署を選んで承認するとチャットを利用できるようになります。</p>
+      <table class="data">
+        <tr><th>ユーザー</th><th>メール</th><th>登録日時</th><th>部署を割り当てて承認</th><th></th></tr>
+        ${pending.map((u) => `<tr>
+          <td>${esc(u.display_name)}</td>
+          <td>${esc(u.email || '')}</td>
+          <td>${esc(u.created_at || '')}</td>
+          <td>
+            <select data-approve-dept="${u.id}">
+              ${d.departments.map((dp) => `<option value="${dp.id}">${esc(dp.name)}</option>`).join('')}
+            </select>
+            <button class="btn-primary" style="padding:6px 14px;font-size:13px" data-approve="${u.id}">承認</button>
+          </td>
+          <td><button class="btn-danger" data-reject="${u.id}">拒否</button></td>
+        </tr>`).join('')}
+      </table>
+    </div>`;
+
+  el.innerHTML = pendingPanel + `
     <div class="panel">
       <h3>ユーザー</h3>
       <p class="desc">私的利用率が高いユーザーには「警告を送る」で個別に通知できます(次回ログイン/画面更新時に表示)。</p>
       <table class="data">
         <tr><th>ユーザー</th><th>部署</th><th>権限</th><th class="num">今月の利用額</th><th class="num">私的利用率</th><th class="num">警告</th><th></th></tr>
-        ${d.users.map((u) => `<tr>
-          <td>${esc(u.display_name)} <span style="color:var(--muted);font-size:11.5px">@${esc(u.username)}</span>
+        ${activeUsers.map((u) => `<tr>
+          <td>${esc(u.display_name)} <span style="color:var(--muted);font-size:11.5px">${esc(u.email || '@' + u.username)}</span>
+            ${u.is_google ? '<span class="pill unlocked">Google</span>' : ''}
             ${u.disabled ? '<span class="pill locked">停止中</span>' : ''}</td>
           <td>
             <select data-dept-of="${u.id}">
@@ -678,6 +740,23 @@ function renderUsers(el, d) {
       </div>
     </div>`;
 
+  el.querySelectorAll('[data-approve]').forEach((b) => {
+    b.onclick = async () => {
+      const id = b.dataset.approve;
+      const deptId = Number(el.querySelector(`[data-approve-dept="${id}"]`).value);
+      await api(`/api/admin/users/${id}`, {
+        method: 'PATCH', body: { status: 'active', department_id: deptId },
+      });
+      renderAdmin();
+    };
+  });
+  el.querySelectorAll('[data-reject]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('このユーザーを拒否(停止)しますか?')) return;
+      await api(`/api/admin/users/${b.dataset.reject}`, { method: 'PATCH', body: { disabled: true } });
+      renderAdmin();
+    };
+  });
   el.querySelectorAll('[data-dept-of]').forEach((sel) => {
     sel.onchange = async () => {
       await api(`/api/admin/users/${sel.dataset.deptOf}`, {

@@ -92,6 +92,18 @@ db.exec(`
   );
 `);
 
+// 既存 DB への追加カラム(Google ログイン・承認制対応)
+{
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('google_sub')) db.exec('ALTER TABLE users ADD COLUMN google_sub TEXT');
+  if (!userCols.includes('email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  if (!userCols.includes('status')) {
+    // status: 'active' = 利用可 / 'pending' = 管理者の承認待ち
+    db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL');
+}
+
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 32).toString('hex');

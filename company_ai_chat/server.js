@@ -44,7 +44,7 @@ function serveStatic(res, pathname) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
-    const handled = await routes.handle(req, res, req.method, url.pathname);
+    const handled = await routes.handle(req, res, req.method, url.pathname, url);
     if (!handled) serveStatic(res, url.pathname);
   } catch (err) {
     console.error('[server]', err);

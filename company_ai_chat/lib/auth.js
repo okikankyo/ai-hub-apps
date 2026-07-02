@@ -17,13 +17,18 @@ function parseCookies(req) {
   return out;
 }
 
-function login(username, password) {
-  const user = db.prepare('SELECT * FROM users WHERE username = ? AND disabled = 0').get(username);
-  if (!user || !verifyPassword(password, user.password_hash)) return null;
+function createSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_TTL_HOURS * 3600 * 1000).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expires);
-  return { token, user };
+  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
+  return token;
+}
+
+function login(username, password) {
+  const user = db.prepare('SELECT * FROM users WHERE username = ? AND disabled = 0').get(username);
+  // password_hash が空のユーザー(Google ログイン専用)はパスワードでは入れない
+  if (!user || !user.password_hash || !verifyPassword(password, user.password_hash)) return null;
+  return { token: createSession(user.id), user };
 }
 
 function logout(token) {
@@ -56,4 +61,4 @@ function clearCookie() {
   return 'session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0';
 }
 
-module.exports = { login, logout, getUser, sessionCookie, clearCookie, parseCookies };
+module.exports = { login, logout, getUser, sessionCookie, clearCookie, parseCookies, createSession };

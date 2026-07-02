@@ -15,6 +15,7 @@ OpenAI API(ChatGPT のモデル)を使った自社向けチャット Web アプ�
 | グラフ化 | 管理ダッシュボードに部署別予算消化・ユーザー別業務/私的比率・日別コストを表示 |
 | ユーザーごとの警告 | 私的利用率が閾値(既定 30%)を超えると自動警告。管理者からの手動警告も可能 |
 | ユーザー管理 | 追加・部署変更・停止/再開・権限(一般/管理者) |
+| Google ログイン + 承認制 | 個人の Google アカウントでログイン可能。初回ログイン時は**承認待ち**となり、管理者が部署を割り当てて承認するまでチャットは使えない |
 
 ## 起動方法
 
@@ -36,6 +37,29 @@ OPENAI_API_KEY=sk-xxxx node server.js
 
 **本番運用前に必ずパスワードを変更してください**(管理画面のユーザータブ、または admin API から変更可能)。
 
+## Google ログインの設定(任意)
+
+1. [Google Cloud Console](https://console.cloud.google.com/apis/credentials) で「OAuth クライアント ID」(種類: ウェブアプリケーション)を作成
+2. 「承認済みのリダイレクト URI」に `{BASE_URL}/auth/google/callback` を追加
+   (例: `http://localhost:8787/auth/google/callback`、本番は `https://chat.example.com/auth/google/callback`)
+3. 環境変数を設定して起動:
+
+```bash
+GOOGLE_CLIENT_ID=xxxx.apps.googleusercontent.com \
+GOOGLE_CLIENT_SECRET=GOCSPX-xxxx \
+BASE_URL=http://localhost:8787 \
+OPENAI_API_KEY=sk-xxxx node server.js
+```
+
+### 承認フロー
+
+1. ユーザーがログイン画面の「Google でログイン」からログイン(個人アカウント可)
+2. 初回は**承認待ち**アカウントとして作成され、本人には「承認待ちです」画面が表示される(チャットは利用不可)
+3. 管理者が管理画面 → ユーザータブの「承認待ちのユーザー」で**部署を割り当てて承認**(または拒否)
+4. 承認後、ユーザーは割り当てられた部署の予算内でチャットを利用できる
+
+既存ユーザーと同じメールアドレスの Google アカウントでログインした場合は、そのアカウントに自動的に紐付きます(再承認は不要)。
+
 ## 環境変数
 
 `.env.example` を参照してください。主なもの:
@@ -48,6 +72,8 @@ OPENAI_API_KEY=sk-xxxx node server.js
 | `USD_JPY` | `150` | コスト換算レート(円/ドル) |
 | `PRIVATE_RATIO_WARN` | `0.3` | 自動警告を出す私的利用率の閾値 |
 | `PRIVATE_MIN_COUNT` | `5` | 自動警告に必要な月間の最低判定件数 |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | (なし=無効) | Google ログイン用 OAuth クライアント |
+| `BASE_URL` | `http://localhost:8787` | リダイレクト URI の生成に使う公開 URL |
 | `PORT` | `8787` | 待ち受けポート |
 | `DATA_DIR` | `./data` | SQLite データベースの保存先 |
 | `SYSTEM_PROMPT` | (社内アシスタント既定文) | チャットのシステムプロンプト |
@@ -67,6 +93,7 @@ company_ai_chat/
 ├── lib/
 │   ├── db.js          # SQLite (node:sqlite) スキーマ・シード
 │   ├── auth.js        # セッション認証
+│   ├── google_auth.js # Google OAuth (OIDC) ログイン
 │   ├── openai.js      # OpenAI API 呼び出し・コスト計算・モック
 │   └── routes.js      # API ルート(チャット SSE / 予算 / 管理)
 ├── public/            # フロントエンド(vanilla JS SPA)
