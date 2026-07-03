@@ -56,6 +56,11 @@ input, select, textarea { font: inherit; }
 }
 .btn-google:hover { background: var(--sidebar); }
 .login-note { color: var(--muted); font-size: 11.5px; text-align: center; margin-top: 8px; }
+.link-btn {
+  display: block; width: 100%; text-align: center; background: none; border: none;
+  color: var(--accent); font-size: 12.5px; margin-top: 10px; padding: 4px;
+}
+.link-btn:hover { text-decoration: underline; }
 .divider {
   display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 18px 0 4px;
 }
@@ -239,6 +244,7 @@ input, select, textarea { font: inherit; }
 .panel svg text { font-family: inherit; }
 
 .legend { display: flex; gap: 16px; font-size: 12.5px; color: var(--ink-2); margin-bottom: 12px; }
+.donut-row { display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
 .legend .item { display: flex; align-items: center; gap: 6px; }
 .legend .swatch { width: 10px; height: 10px; border-radius: 3px; }
 

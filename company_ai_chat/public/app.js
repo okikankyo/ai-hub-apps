@@ -125,19 +125,32 @@ async function renderLogin() {
           Google でログイン
         </a>
         <div class="login-note">初めての方は Google ログイン後、管理者の承認をお待ちください。</div>
-        <div class="divider"><span>または</span></div>` : ''}
-        <label>ユーザー名</label>
-        <input name="username" autocomplete="username" required ${config.google_enabled ? '' : 'autofocus'}>
-        <label>パスワード</label>
-        <input name="password" type="password" autocomplete="current-password" required>
-        <button class="btn-primary" type="submit">ログイン</button>
+        <button type="button" class="link-btn" id="toggle-pw-login">パスワードでログイン(管理者用)</button>` : ''}
+        <div id="pw-fields" style="${config.google_enabled ? 'display:none' : ''}">
+          <label>ユーザー名</label>
+          <input name="username" autocomplete="username" ${config.google_enabled ? '' : 'required autofocus'}>
+          <label>パスワード</label>
+          <input name="password" type="password" autocomplete="current-password" ${config.google_enabled ? '' : 'required'}>
+          <button class="btn-primary" type="submit">ログイン</button>
+        </div>
         <div class="login-error" id="login-error">${esc(loginError)}</div>
       </form>
     </div>`;
   if (loginError) history.replaceState(null, '', '/');
+  const toggleBtn = document.getElementById('toggle-pw-login');
+  if (toggleBtn) {
+    toggleBtn.onclick = () => {
+      const fields = document.getElementById('pw-fields');
+      const show = fields.style.display === 'none';
+      fields.style.display = show ? '' : 'none';
+      fields.querySelectorAll('input').forEach((el) => { el.required = show; });
+      toggleBtn.textContent = show ? '閉じる' : 'パスワードでログイン(管理者用)';
+    };
+  }
   document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    if (!fd.get('username') && !fd.get('password')) return; // パスワード欄が隠れている間の誤送信を無視
     try {
       await api('/api/login', { method: 'POST', body: { username: fd.get('username'), password: fd.get('password') } });
       await init();
@@ -572,11 +585,27 @@ function renderDashboard(el, d) {
     </div>
 
     <div class="panel">
+      <h3>業務 / プライベート比率(全社)</h3>
+      <p class="desc">
+        AIがメッセージごとに「業務」か「プライベート」かを自動判定した集計です(本文は保存されず、ラベルのみ)。<br>
+        <strong>あくまで目安です。</strong>特に観光業では、雑談のようなカジュアルな会話でも接客・案内など業務目的であることが多いため、
+        この数字だけで利用者を判断しないようご注意ください。
+      </p>
+      <div class="donut-row">
+        <div id="chart-donut"></div>
+        <div class="legend" style="flex-direction:column;gap:10px;justify-content:center">
+          <span class="item"><span class="swatch" style="background:#2a78d6"></span>業務 ${totalJudged ? Math.round(((totalJudged - totalPrivate) / totalJudged) * 100) : 0}%(${totalJudged - totalPrivate}件)</span>
+          <span class="item"><span class="swatch" style="background:#e34948"></span>プライベート ${totalJudged ? Math.round((totalPrivate / totalJudged) * 100) : 0}%(${totalPrivate}件)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
       <h3>ユーザー別 業務/私的利用の比率</h3>
-      <p class="desc">AIがメッセージごとに判定したラベルの集計です(本文は保存していません)。</p>
+      <p class="desc">AIがメッセージごとに判定したラベルの集計です(本文は保存していません)。上記と同じく目安としてご利用ください。</p>
       <div class="legend">
         <span class="item"><span class="swatch" style="background:#2a78d6"></span>業務</span>
-        <span class="item"><span class="swatch" style="background:#1baf7a"></span>私的利用</span>
+        <span class="item"><span class="swatch" style="background:#e34948"></span>プライベート</span>
       </div>
       <div id="chart-ratio"></div>
     </div>
@@ -604,9 +633,37 @@ function renderDashboard(el, d) {
     </div>`;
 
   document.getElementById('chart-budget').innerHTML = budgetChart(d.departments);
+  document.getElementById('chart-donut').innerHTML = workPrivateDonut(totalJudged - totalPrivate, totalPrivate);
   document.getElementById('chart-ratio').innerHTML = ratioChart(d.users);
   document.getElementById('chart-daily').innerHTML = dailyChart(d.daily);
   attachChartTooltips(el);
+}
+
+// 全社の業務/プライベート比率ドーナツチャート(業務=青、プライベート=赤)
+function workPrivateDonut(work, priv) {
+  const total = work + priv;
+  const size = 200, cx = size / 2, cy = size / 2, r = 72, stroke = 28;
+  if (total === 0) {
+    return `<svg viewBox="0 0 ${size} ${size}" width="200" height="200" role="img" aria-label="業務/プライベート比率">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e1e0d9" stroke-width="${stroke}"></circle>
+      <text x="${cx}" y="${cy + 5}" text-anchor="middle" font-size="13" fill="#898781">判定データなし</text>
+    </svg>`;
+  }
+  const circumference = 2 * Math.PI * r;
+  const workLen = (work / total) * circumference;
+  const privLen = circumference - workLen;
+  const privPct = Math.round((priv / total) * 100);
+  return `<svg viewBox="0 0 ${size} ${size}" width="200" height="200" role="img" aria-label="業務/プライベート比率(全社)">
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e1e0d9" stroke-width="${stroke}"></circle>
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#2a78d6" stroke-width="${stroke}"
+      stroke-dasharray="${workLen} ${circumference}" stroke-dashoffset="0" transform="rotate(-90 ${cx} ${cy})"
+      data-tip="業務 ${work}件"></circle>
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e34948" stroke-width="${stroke}"
+      stroke-dasharray="${privLen} ${circumference}" stroke-dashoffset="${-workLen}" transform="rotate(-90 ${cx} ${cy})"
+      data-tip="プライベート ${priv}件"></circle>
+    <text x="${cx}" y="${cy - 4}" text-anchor="middle" font-size="26" font-weight="700" fill="#0b0b0b">${privPct}%</text>
+    <text x="${cx}" y="${cy + 16}" text-anchor="middle" font-size="12" fill="#898781">プライベート</text>
+  </svg>`;
 }
 
 // 部署別予算バー(横棒: 予算トラック + 利用額フィル)
@@ -656,7 +713,7 @@ function ratioChart(users) {
       <text x="0" y="${y + 14}" font-size="13" fill="#0b0b0b">${esc(u.display_name)}</text>
       <rect x="${labelW}" y="${y}" width="${Math.max(workW, 0)}" height="20" rx="4" fill="#2a78d6"
         data-tip="${esc(u.display_name)} 業務 ${u.stats.work}件(${100 - privPct}%)"></rect>
-      <rect x="${labelW + workW + 2}" y="${y}" width="${Math.max(privW - 2, 0)}" height="20" rx="4" fill="#1baf7a"
+      <rect x="${labelW + workW + 2}" y="${y}" width="${Math.max(privW - 2, 0)}" height="20" rx="4" fill="#e34948"
         data-tip="${esc(u.display_name)} 私的 ${u.stats.private}件(${privPct}%)"></rect>
       <text x="${labelW + plotW + 10}" y="${y + 14}" font-size="12" fill="#52514e">私的 ${privPct}%(${u.stats.judged}件)</text>`;
   });
@@ -721,10 +778,11 @@ function renderDepts(el, d) {
     <div class="panel">
       <h3>部署と予算</h3>
       <p class="desc">予算(円/月)を編集できます。超過するとその部署のチャットは自動でロックされ、「ロック解除」で今月分のみ解除できます。</p>
+      <p class="desc">部署の利用額は、その部署に所属する全ユーザーの利用額の合計です(ユーザータブで内訳を確認できます)。</p>
       <table class="data">
-        <tr><th>部署</th><th class="num">今月の利用額</th><th class="num">予算(円/月)</th><th>状態</th><th></th></tr>
+        <tr><th>部署名</th><th class="num">今月の利用額</th><th class="num">予算(円/月)</th><th>状態</th><th></th></tr>
         ${d.departments.map((dp) => `<tr>
-          <td>${esc(dp.name)}</td>
+          <td><input class="inline-input" style="width:140px;text-align:left" data-name="${dp.id}" value="${esc(dp.name)}"></td>
           <td class="num">${yen(dp.used_jpy)}(${Math.round(dp.ratio * 100)}%)</td>
           <td class="num"><input class="inline-input" data-budget="${dp.id}" value="${Math.round(dp.monthly_budget_jpy)}"></td>
           <td>${dp.locked ? '<span class="pill locked">🔒 ロック中</span>'
@@ -734,6 +792,7 @@ function renderDepts(el, d) {
             <button class="btn-ghost" data-save="${dp.id}">保存</button>
             ${dp.locked ? `<button class="btn-primary" style="padding:6px 12px;font-size:13px" data-unlock="${dp.id}">ロック解除</button>` : ''}
             ${dp.unlocked_by_admin ? `<button class="btn-ghost" data-relock="${dp.id}">解除を取消</button>` : ''}
+            <button class="btn-danger" data-delete-dept="${dp.id}">削除</button>
           </td>
         </tr>`).join('')}
       </table>
@@ -748,7 +807,19 @@ function renderDepts(el, d) {
     b.onclick = async () => {
       const id = b.dataset.save;
       const val = Number(el.querySelector(`[data-budget="${id}"]`).value);
-      await api(`/api/admin/departments/${id}`, { method: 'PATCH', body: { monthly_budget_jpy: val } });
+      const name = el.querySelector(`[data-name="${id}"]`).value;
+      try {
+        await api(`/api/admin/departments/${id}`, { method: 'PATCH', body: { monthly_budget_jpy: val, name } });
+        renderAdmin();
+      } catch (err) {
+        alert(err.message);
+      }
+    };
+  });
+  el.querySelectorAll('[data-delete-dept]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('この部署を削除しますか?所属ユーザーは「未設定」になります(利用履歴は保持されます)。')) return;
+      await api(`/api/admin/departments/${b.dataset.deleteDept}`, { method: 'DELETE' });
       renderAdmin();
     };
   });
@@ -806,7 +877,8 @@ function renderUsers(el, d) {
   el.innerHTML = pendingPanel + `
     <div class="panel">
       <h3>ユーザー</h3>
-      <p class="desc">私的利用率が高いユーザーには「警告を送る」で個別に通知できます(次回ログイン/画面更新時に表示)。</p>
+      <p class="desc">私的利用率が高いユーザーには「警告を送る」で個別に通知できます(次回ログイン/画面更新時に表示)。<br>
+      「今月の利用額」は<strong>このユーザー個人</strong>の金額です。部署タブの利用額は、その部署に所属するユーザー全員の金額を合計したものです。</p>
       <table class="data">
         <tr><th>ユーザー</th><th>部署</th><th>権限</th><th class="num">今月の利用額</th><th class="num">私的利用率</th><th class="num">警告</th><th></th></tr>
         ${activeUsers.map((u) => `<tr>

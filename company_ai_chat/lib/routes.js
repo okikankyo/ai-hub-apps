@@ -527,6 +527,15 @@ async function handleAdmin(req, res, method, pathname) {
     const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
     if (!dept) return json(res, 404, { error: '部署が見つかりません' });
     const body = await readBody(req);
+    if (body.name !== undefined) {
+      const name = String(body.name).trim();
+      if (!name) return json(res, 400, { error: '部署名を入力してください' });
+      try {
+        db.prepare('UPDATE departments SET name = ? WHERE id = ?').run(name, id);
+      } catch {
+        return json(res, 400, { error: '同名の部署が既に存在します' });
+      }
+    }
     if (body.monthly_budget_jpy !== undefined) {
       const budget = parseBudget(body.monthly_budget_jpy);
       if (budget === null) return json(res, 400, { error: '予算は0以上の数値で入力してください' });
@@ -539,6 +548,18 @@ async function handleAdmin(req, res, method, pathname) {
       db.prepare('UPDATE departments SET unlock_month = NULL WHERE id = ?').run(id);
     }
     return json(res, 200, deptStatus(db.prepare('SELECT * FROM departments WHERE id = ?').get(id)));
+  }
+
+  if (method === 'DELETE' && deptMatch) {
+    const id = Number(deptMatch[1]);
+    const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
+    if (!dept) return json(res, 404, { error: '部署が見つかりません' });
+    // 履歴データ(利用ログ・判定結果)は削除せず、所属だけ外して保持する
+    db.prepare('UPDATE users SET department_id = NULL WHERE department_id = ?').run(id);
+    db.prepare('UPDATE usage_log SET department_id = NULL WHERE department_id = ?').run(id);
+    db.prepare('UPDATE classifications SET department_id = NULL WHERE department_id = ?').run(id);
+    db.prepare('DELETE FROM departments WHERE id = ?').run(id);
+    return json(res, 200, { ok: true });
   }
 
   if (method === 'POST' && pathname === '/api/admin/users') {
