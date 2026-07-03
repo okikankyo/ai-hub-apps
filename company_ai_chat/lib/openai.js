@@ -48,8 +48,8 @@ const SYSTEM_PROMPT =
 
 // チャット補完をストリーミングで実行する。
 // onDelta(text) がトークンごとに呼ばれ、完了時に { content, promptTokens, completionTokens, model } を返す。
-async function streamChat(history, onDelta, model = LIGHT_MODEL) {
-  if (MOCK) return mockStream(history, onDelta, model);
+async function streamChat(history, onDelta, model = LIGHT_MODEL, signal) {
+  if (MOCK) return mockStream(history, onDelta, model, signal);
 
   const res = await fetch(`${API_BASE}/chat/completions`, {
     method: 'POST',
@@ -63,6 +63,7 @@ async function streamChat(history, onDelta, model = LIGHT_MODEL) {
       stream: true,
       stream_options: { include_usage: true },
     }),
+    signal,
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -112,7 +113,9 @@ const ROUTER_PROMPT =
   '分類名だけを answer してください。\n' +
   'light: 軽い質問、言い換え、SNS文案、メール返信案、文章チェック、項目の整理、画像生成プロンプトの文章化・整理\n' +
   'heavy: 仕様の整理、bot・システムの設計、開発指示書の作成、バグ・不具合の調査、データベース設計、セキュリティに関わる相談\n' +
-  'image: 画像・イラスト・ロゴ・写真などを実際に生成してほしい依頼\n' +
+  'image: 何を描くか(被写体・構図など)が具体的に示されていて、今すぐ実際に画像を生成してほしい依頼。\n' +
+  '  ただし、用途・テイスト・要素・縦横比などの要件確認を先に求めている依頼、進め方の指示だけのメッセージ、\n' +
+  '  具体的な内容がまだ決まっていない依頼は image ではなく heavy に分類すること(先に会話で要件を詰めるため)。\n' +
   'sensitive: メール送信やデータ削除など実行を伴う操作、金額・支払い・請求に関わるもの、個人情報を含む・扱うもの\n' +
   '回答は light / heavy / image / sensitive のいずれか1語のみ。';
 
@@ -240,12 +243,13 @@ function estimateTokens(history) {
 
 // ---- モックモード(APIキーなしでの動作確認用) ----
 
-async function mockStream(history, onDelta, model = LIGHT_MODEL) {
+async function mockStream(history, onDelta, model = LIGHT_MODEL, signal) {
   const last = history[history.length - 1]?.content || '';
   const reply =
     `(モック応答 / ${model})「${last.slice(0, 40)}」を受け取りました。` +
     'OPENAI_API_KEY を設定すると実際のモデルが応答します。';
   for (const ch of reply) {
+    if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
     onDelta(ch);
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -259,11 +263,17 @@ async function mockStream(history, onDelta, model = LIGHT_MODEL) {
 
 function mockRoute(text) {
   let category = 'light';
+  const looksLikeImageRequest =
+    /(画像|イラスト|ロゴ|写真)[^。]*(生成|作成|作って|描いて)|(生成|作って|描いて)[^。]*(画像|イラスト|ロゴ)/.test(text);
+  // 用途・テイスト等の要件確認を求めるだけのメッセージ(テンプレート等)は
+  // 先に会話で詰めるべきなので、image ではなく heavy に倒す
+  const isRequirementsGathering = /確認して|用途|テイスト|縦横比|要素・色/.test(text);
+
   if (/送信|削除|支払|振込|請求|金額|個人情報|マイナンバー|パスワード|住所|電話番号/.test(text)) {
     category = 'sensitive';
-  } else if (/(画像|イラスト|ロゴ|写真)[^。]*(生成|作成|作って|描いて)|(生成|作って|描いて)[^。]*(画像|イラスト|ロゴ)/.test(text)) {
+  } else if (looksLikeImageRequest && !isRequirementsGathering) {
     category = 'image';
-  } else if (/バグ|不具合|設計|セキュリティ|仕様|データベース|DB|指示書|アーキテクチャ/.test(text)) {
+  } else if (isRequirementsGathering || /バグ|不具合|設計|セキュリティ|仕様|データベース|DB|指示書|アーキテクチャ/.test(text)) {
     category = 'heavy';
   }
   return { category, model: modelFor(category), promptTokens: 0, completionTokens: 0 };

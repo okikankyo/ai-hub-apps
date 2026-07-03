@@ -438,7 +438,17 @@ async function handleChat(req, res, user) {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  // クライアントが停止/切断した後に書き込みを試みてもエラーにならないようにする
+  const send = (event, data) => {
+    if (res.writableEnded || res.destroyed) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // 「停止」ボタン押下やタブを閉じるなどでクライアントが切断したら、
+  // OpenAI側へのリクエストも中断してトークンの無駄遣いを防ぐ
+  const controller = new AbortController();
+  let finished = false;
+  req.on('close', () => { if (!finished) controller.abort(); });
 
   const saveAssistant = (content, model, promptTokens, completionTokens, fixedCostJpy) => {
     db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
@@ -485,18 +495,22 @@ async function handleChat(req, res, user) {
     const result = await openai.streamChat(history, (delta) => {
       partial += delta;
       send('delta', { text: delta });
-    }, route.model);
+    }, route.model, controller.signal);
     const cost = saveAssistant(result.content, result.model, result.promptTokens, result.completionTokens);
     sendDone(cost, result.model);
   } catch (err) {
-    console.error('[chat]', err);
-    // 途中まで生成された分も保存し、概算トークンで予算に計上する(集計漏れ防止)
+    finished = true;
+    // 途中まで生成された分は、停止によるものでも保存し概算トークンで予算に計上する(集計漏れ防止)
     if (partial) {
       saveAssistant(partial, route.model,
         openai.estimateTokens(history), Math.ceil(partial.length / 3));
     }
-    send('error', { message: 'AI応答の取得に失敗しました。時間をおいて再度お試しください。' });
+    if (err.name !== 'AbortError') {
+      console.error('[chat]', err);
+      send('error', { message: 'AI応答の取得に失敗しました。時間をおいて再度お試しください。' });
+    }
   }
+  finished = true;
   res.end();
 
   // 仕事/プライベート判定は応答と切り離して非同期実行(ラベルのみ保存)

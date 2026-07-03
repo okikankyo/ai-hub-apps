@@ -18,6 +18,7 @@ const state = {
   templatesExpanded: false,
   templateEditMode: false, // 管理者のみ: チャット画面内でのテンプレート編集モード
   templateSnapshot: null,  // 編集モードに入った時点のテンプレート一覧(「リセット」で戻す先)
+  abortController: null,   // 生成中の「停止」ボタン用
 };
 
 const TEMPLATE_VISIBLE_COUNT = 3; // これを超える分はドリルダウンで畳む
@@ -662,10 +663,11 @@ async function sendMessage() {
 
 async function executeChat(text, confirmed) {
   state.streaming = true;
-  const sendBtn = document.getElementById('send');
-  if (sendBtn) sendBtn.disabled = true;
+  state.abortController = new AbortController();
+  setSendButtonMode('stop');
   const stream = appendStreamingRow();
   let refreshAfter = true; // 確認ダイアログ表示時は画面を作り直さない
+  let acc = ''; // catch節でも参照するため try の外で宣言する
 
   try {
     const res = await fetch('/api/chat', {
@@ -677,6 +679,7 @@ async function executeChat(text, confirmed) {
         confirmed,
         model_pref: state.modelPref,
       }),
+      signal: state.abortController.signal,
     });
 
     // JSON 応答 = ストリーミング以外(エラー or 人間確認の要求)
@@ -698,7 +701,6 @@ async function executeChat(text, confirmed) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
-    let acc = '';
     let done = null;
     while (true) {
       const { value, done: eof } = await reader.read();
@@ -730,18 +732,41 @@ async function executeChat(text, confirmed) {
     state.messages.push({ role: 'assistant', content: acc, model: done?.model });
     renderMessages();
   } catch (err) {
-    state.messages.push({ role: 'assistant', content: `⚠️ 通信エラー: ${err.message}` });
+    if (err.name === 'AbortError') {
+      // ここまで生成された内容をそのまま確定させる(サーバー側でも保存済み)
+      state.messages.push({ role: 'assistant', content: acc || '(停止しました)' });
+    } else {
+      state.messages.push({ role: 'assistant', content: `⚠️ 通信エラー: ${err.message}` });
+    }
     renderMessages();
   } finally {
     state.streaming = false;
+    state.abortController = null;
+    setSendButtonMode('send');
     if (refreshAfter) {
       // 予算メーター・タイトル・警告を最新化(画面全体を再描画)
       await loadMe();
       await loadConversations();
       render();
-    } else if (sendBtn) {
-      sendBtn.disabled = false;
     }
+  }
+}
+
+// 送信ボタンを「送信」⇄「停止」の見た目・動作に切り替える
+function setSendButtonMode(mode) {
+  const btn = document.getElementById('send');
+  if (!btn) return;
+  if (mode === 'stop') {
+    btn.textContent = '■';
+    btn.title = '生成を停止';
+    btn.classList.add('stop-mode');
+    btn.disabled = false;
+    btn.onclick = () => state.abortController?.abort();
+  } else {
+    btn.textContent = '↑';
+    btn.title = '送信';
+    btn.classList.remove('stop-mode');
+    btn.onclick = sendMessage;
   }
 }
 

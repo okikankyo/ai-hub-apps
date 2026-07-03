@@ -244,6 +244,7 @@ input, select, textarea { font: inherit; }
   display: flex; align-items: center; justify-content: center;
 }
 .composer .send:disabled { background: var(--baseline); }
+.composer .send.stop-mode { background: var(--critical); font-size: 13px; }
 .composer-note { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 8px; }
 
 /* ロックオーバーレイ */
