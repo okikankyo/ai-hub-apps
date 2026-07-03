@@ -33,11 +33,16 @@ function serveStatic(res, pathname) {
       // SPA なので不明なパスは index.html にフォールバック
       fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (err2, html) => {
         if (err2) return res.writeHead(404).end('not found');
-        res.writeHead(200, { 'Content-Type': MIME['.html'] }).end(html);
+        res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': 'no-cache' }).end(html);
       });
       return;
     }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' }).end(data);
+    // デプロイのたびに更新されるアプリ本体なので、CDN/ブラウザに古い版を
+    // 長時間キャッシュされないよう明示的に no-cache を指定する。
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'Cache-Control': 'no-cache',
+    }).end(data);
   });
 }
 
