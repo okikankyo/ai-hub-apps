@@ -90,6 +90,16 @@ db.exec(`
     acknowledged INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
+
+  -- チャット開始時にワンクリックで送信できる定型文(管理者が管理、最少1件・最大5件)
+  CREATE TABLE IF NOT EXISTS prompt_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
 `);
 
 // 既存 DB への追加カラム(Google ログイン・承認制対応)
@@ -146,5 +156,16 @@ function seed() {
 }
 
 seed();
+
+// テンプレートは既存DBにも(初回のみ)1件だけ用意する
+{
+  const templateCount = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates').get().n;
+  if (templateCount === 0) {
+    db.prepare('INSERT INTO prompt_templates (label, prompt, position) VALUES (?, ?, 0)').run(
+      '議事録を作成',
+      '以下の会議メモから、日時・参加者・議題・決定事項・次のアクションをまとめた議事録を作成してください。\n\n[ここに会議メモを貼り付けてください]'
+    );
+  }
+}
 
 module.exports = { db, hashPassword, verifyPassword, currentMonth, DATA_DIR };

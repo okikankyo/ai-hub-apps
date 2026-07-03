@@ -14,7 +14,11 @@ const state = {
   adminData: null,
   modelPref: 'auto',     // 'auto' | 'light' | 'heavy'
   pendingConfirm: null,  // { text, msg, routerError } 実行前確認の待機状態
+  templates: [],         // チャット開始画面のテンプレート一覧
+  templatesExpanded: false,
 };
+
+const TEMPLATE_VISIBLE_COUNT = 3; // これを超える分はドリルダウンで畳む
 
 // ---------- ユーティリティ ----------
 
@@ -80,6 +84,7 @@ async function init() {
       return;
     }
     await loadConversations();
+    try { state.templates = await api('/api/templates'); } catch { state.templates = []; }
     render();
   } else {
     renderLogin();
@@ -193,6 +198,16 @@ function render() {
             </div>
             <div class="meter-track"><div class="meter-fill ${meterClass}" style="width:${(usedRatio * 100).toFixed(1)}%"></div></div>
           </div>` : ''}
+          ${me.my_private_stats && me.my_private_stats.judged > 0 ? `
+          <div class="my-ratio">
+            <div id="my-donut"></div>
+            <div class="my-ratio-legend">
+              <div>あなたの業務/プライベート比率</div>
+              <span class="item"><span class="swatch" style="background:#2a78d6"></span>業務 ${me.my_private_stats.work}件</span>
+              <span class="item"><span class="swatch" style="background:#e34948"></span>プライベート ${me.my_private_stats.private}件</span>
+              <div class="muted-note">AIによる目安です</div>
+            </div>
+          </div>` : ''}
           <div class="links">
             ${me.user.role === 'admin' ? `<button class="btn-ghost" id="btn-admin">${state.view === 'admin' ? 'チャットへ' : '管理画面'}</button>` : ''}
             <button class="btn-ghost" id="btn-logout">ログアウト</button>
@@ -202,6 +217,11 @@ function render() {
       <main class="main" id="main"></main>
     </div>
     <div class="chart-tooltip" id="chart-tooltip"></div>`;
+
+  const myDonut = document.getElementById('my-donut');
+  if (myDonut) {
+    myDonut.innerHTML = workPrivateDonut(me.my_private_stats.work, me.my_private_stats.private, { size: 64, label: '' });
+  }
 
   document.getElementById('new-chat').onclick = async () => {
     state.currentConvId = null;
@@ -345,7 +365,9 @@ function renderMessages() {
       <div class="empty-state">
         <h2>お手伝いできることはありますか?</h2>
         <p>業務に関する質問・文章作成・翻訳・コード作成などに使えます。</p>
+        ${renderTemplateButtons()}
       </div>`;
+    attachTemplateButtonHandlers(thread);
     return;
   }
   thread.innerHTML = state.messages.map((m) =>
@@ -358,6 +380,41 @@ function renderMessages() {
   // 実行前確認カードは state から復元する(再描画で消えないように)
   if (state.pendingConfirm) thread.appendChild(buildConfirmCard());
   scrollToBottom();
+}
+
+// チャット未経験のユーザー向けのワンクリック定型文ボタン(管理者がテンプレート管理画面で編集)
+function renderTemplateButtons() {
+  if (!state.templates.length) return '';
+  const visible = state.templatesExpanded ? state.templates : state.templates.slice(0, TEMPLATE_VISIBLE_COUNT);
+  const hiddenCount = state.templates.length - visible.length;
+  const buttons = visible.map((t) =>
+    `<button class="template-btn" data-template-id="${t.id}">${esc(t.label)}</button>`).join('');
+  let more = '';
+  if (hiddenCount > 0) {
+    more = `<button class="template-btn template-more" id="template-toggle">+${hiddenCount} その他</button>`;
+  } else if (state.templatesExpanded && state.templates.length > TEMPLATE_VISIBLE_COUNT) {
+    more = `<button class="template-btn template-more" id="template-toggle">閉じる</button>`;
+  }
+  return `<div class="template-row">${buttons}${more}</div>`;
+}
+
+function attachTemplateButtonHandlers(root) {
+  root.querySelectorAll('[data-template-id]').forEach((btn) => {
+    btn.onclick = () => {
+      const tpl = state.templates.find((t) => t.id === Number(btn.dataset.templateId));
+      if (!tpl) return;
+      const input = document.getElementById('input');
+      if (input) input.value = tpl.prompt;
+      sendMessage();
+    };
+  });
+  const toggle = root.querySelector('#template-toggle');
+  if (toggle) {
+    toggle.onclick = () => {
+      state.templatesExpanded = !state.templatesExpanded;
+      renderMessages();
+    };
+  }
 }
 
 function scrollToBottom() {
@@ -541,6 +598,7 @@ async function renderAdmin() {
     ['dashboard', 'ダッシュボード'],
     ['depts', '部署・予算'],
     ['users', 'ユーザー'],
+    ['templates', 'テンプレート'],
   ];
   main.innerHTML = `
     <div class="admin-wrap"><div class="admin-inner">
@@ -556,7 +614,8 @@ async function renderAdmin() {
   const body = document.getElementById('admin-body');
   if (state.adminTab === 'dashboard') renderDashboard(body, d);
   else if (state.adminTab === 'depts') renderDepts(body, d);
-  else renderUsers(body, d);
+  else if (state.adminTab === 'users') renderUsers(body, d);
+  else renderTemplatesAdmin(body);
 }
 
 // --- ダッシュボード ---
@@ -640,20 +699,25 @@ function renderDashboard(el, d) {
 }
 
 // 全社の業務/プライベート比率ドーナツチャート(業務=青、プライベート=赤)
-function workPrivateDonut(work, priv) {
+function workPrivateDonut(work, priv, opts = {}) {
+  const size = opts.size || 200;
+  const stroke = opts.stroke || Math.round(size * 0.14);
+  const fontBig = opts.fontBig || Math.round(size * 0.13);
+  const fontSmall = opts.fontSmall || Math.round(size * 0.06);
+  const label = opts.label !== undefined ? opts.label : 'プライベート';
   const total = work + priv;
-  const size = 200, cx = size / 2, cy = size / 2, r = 72, stroke = 28;
+  const cx = size / 2, cy = size / 2, r = size / 2 - stroke / 2 - 4;
   if (total === 0) {
-    return `<svg viewBox="0 0 ${size} ${size}" width="200" height="200" role="img" aria-label="業務/プライベート比率">
+    return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="業務/プライベート比率">
       <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e1e0d9" stroke-width="${stroke}"></circle>
-      <text x="${cx}" y="${cy + 5}" text-anchor="middle" font-size="13" fill="#898781">判定データなし</text>
+      ${size >= 120 ? `<text x="${cx}" y="${cy + 5}" text-anchor="middle" font-size="${fontSmall}" fill="#898781">判定データなし</text>` : ''}
     </svg>`;
   }
   const circumference = 2 * Math.PI * r;
   const workLen = (work / total) * circumference;
   const privLen = circumference - workLen;
   const privPct = Math.round((priv / total) * 100);
-  return `<svg viewBox="0 0 ${size} ${size}" width="200" height="200" role="img" aria-label="業務/プライベート比率(全社)">
+  return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="業務/プライベート比率">
     <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e1e0d9" stroke-width="${stroke}"></circle>
     <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#2a78d6" stroke-width="${stroke}"
       stroke-dasharray="${workLen} ${circumference}" stroke-dashoffset="0" transform="rotate(-90 ${cx} ${cy})"
@@ -661,8 +725,8 @@ function workPrivateDonut(work, priv) {
     <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e34948" stroke-width="${stroke}"
       stroke-dasharray="${privLen} ${circumference}" stroke-dashoffset="${-workLen}" transform="rotate(-90 ${cx} ${cy})"
       data-tip="プライベート ${priv}件"></circle>
-    <text x="${cx}" y="${cy - 4}" text-anchor="middle" font-size="26" font-weight="700" fill="#0b0b0b">${privPct}%</text>
-    <text x="${cx}" y="${cy + 16}" text-anchor="middle" font-size="12" fill="#898781">プライベート</text>
+    <text x="${cx}" y="${cy - (label ? fontSmall * 0.3 : -fontBig * 0.35)}" text-anchor="middle" font-size="${fontBig}" font-weight="700" fill="#0b0b0b">${privPct}%</text>
+    ${label ? `<text x="${cx}" y="${cy + fontSmall + 4}" text-anchor="middle" font-size="${fontSmall}" fill="#898781">${esc(label)}</text>` : ''}
   </svg>`;
 }
 
@@ -973,6 +1037,98 @@ function renderUsers(el, d) {
       alert(err.message);
     }
   };
+}
+
+// --- テンプレート管理タブ ---
+
+async function renderTemplatesAdmin(el) {
+  el.innerHTML = '<div class="panel">読み込み中…</div>';
+  let templates;
+  try {
+    templates = await api('/api/admin/templates');
+  } catch (err) {
+    el.innerHTML = `<div class="panel">⚠️ ${esc(err.message)}</div>`;
+    return;
+  }
+
+  const TEMPLATE_MAX = 5;
+  const atMax = templates.length >= TEMPLATE_MAX;
+  const atMin = templates.length <= 1;
+
+  el.innerHTML = `
+    <div class="panel">
+      <h3>チャット開始時のテンプレート</h3>
+      <p class="desc">
+        チャットに慣れていないユーザーでもワンクリックで使えるコピペ済みの定型文です。ボタンを押すと、
+        その内容がそのまま送信されてチャットが始まります。最低1個・最大${TEMPLATE_MAX}個まで登録できます
+        (現在 ${templates.length}/${TEMPLATE_MAX})。
+      </p>
+      <div class="template-cards">
+        ${templates.map((t) => `
+          <div class="template-card">
+            <label>ボタンに表示する名前</label>
+            <input class="tpl-label" value="${esc(t.label)}" maxlength="20">
+            <label>送信される内容</label>
+            <textarea class="tpl-prompt" rows="3">${esc(t.prompt)}</textarea>
+            <div class="template-card-actions">
+              <button class="btn-primary" data-save-tpl="${t.id}">保存</button>
+              <button class="btn-ghost" data-reset-tpl="${t.id}">リセット</button>
+              <button class="btn-ghost" data-dup-tpl="${t.id}" ${atMax ? 'disabled' : ''}>複製</button>
+              <button class="btn-danger" data-del-tpl="${t.id}" ${atMin ? 'disabled title="最低1個は必要です"' : ''}>削除</button>
+            </div>
+          </div>`).join('')}
+      </div>
+      <button class="btn-primary" id="add-template" ${atMax ? 'disabled' : ''} style="margin-top:14px">＋ 新規テンプレート追加</button>
+    </div>`;
+
+  const refresh = async () => {
+    try { state.templates = await api('/api/templates'); } catch { /* 反映は次回でも可 */ }
+    renderTemplatesAdmin(el);
+  };
+
+  el.querySelectorAll('[data-save-tpl]').forEach((btn) => {
+    btn.onclick = async () => {
+      const card = btn.closest('.template-card');
+      const label = card.querySelector('.tpl-label').value.trim();
+      const prompt = card.querySelector('.tpl-prompt').value.trim();
+      try {
+        await api(`/api/admin/templates/${btn.dataset.saveTpl}`, { method: 'PATCH', body: { label, prompt } });
+        await refresh();
+      } catch (err) { alert(err.message); }
+    };
+  });
+  el.querySelectorAll('[data-reset-tpl]').forEach((btn) => {
+    btn.onclick = () => renderTemplatesAdmin(el); // 再取得して未保存の編集を破棄
+  });
+  el.querySelectorAll('[data-dup-tpl]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await api(`/api/admin/templates/${btn.dataset.dupTpl}/duplicate`, { method: 'POST' });
+        await refresh();
+      } catch (err) { alert(err.message); }
+    };
+  });
+  el.querySelectorAll('[data-del-tpl]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm('このテンプレートを削除しますか?')) return;
+      try {
+        await api(`/api/admin/templates/${btn.dataset.delTpl}`, { method: 'DELETE' });
+        await refresh();
+      } catch (err) { alert(err.message); }
+    };
+  });
+  const addBtn = document.getElementById('add-template');
+  if (addBtn) {
+    addBtn.onclick = async () => {
+      try {
+        await api('/api/admin/templates', {
+          method: 'POST',
+          body: { label: '新しいテンプレート', prompt: 'ここに送信したい内容を入力してください' },
+        });
+        await refresh();
+      } catch (err) { alert(err.message); }
+    };
+  }
 }
 
 init();

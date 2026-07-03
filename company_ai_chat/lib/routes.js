@@ -223,6 +223,11 @@ async function handle(req, res, method, pathname, url) {
   const user = requireUser(req, res);
   if (!user) return true;
 
+  if (method === 'GET' && pathname === '/api/templates') {
+    const rows = db.prepare('SELECT id, label, prompt FROM prompt_templates ORDER BY position, id').all();
+    return json(res, 200, rows);
+  }
+
   if (method === 'GET' && pathname === '/api/me') {
     const dept = getUserDept(user);
     const warnings = db.prepare(
@@ -473,9 +478,70 @@ async function classifyAsync(user, text) {
 
 // ---- 管理者 API ----
 
+const TEMPLATE_MIN = 1;
+const TEMPLATE_MAX = 5;
+
 async function handleAdmin(req, res, method, pathname) {
   const admin = requireAdmin(req, res);
   if (!admin) return true;
+
+  if (method === 'GET' && pathname === '/api/admin/templates') {
+    const rows = db.prepare('SELECT * FROM prompt_templates ORDER BY position, id').all();
+    return json(res, 200, rows);
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/templates') {
+    const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates').get().n;
+    if (count >= TEMPLATE_MAX) {
+      return json(res, 400, { error: `テンプレートは最大${TEMPLATE_MAX}個までです` });
+    }
+    const { label, prompt } = await readBody(req);
+    if (!String(label || '').trim() || !String(prompt || '').trim()) {
+      return json(res, 400, { error: 'ラベルと内容を入力してください' });
+    }
+    const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM prompt_templates').get().p;
+    const id = db.prepare('INSERT INTO prompt_templates (label, prompt, position) VALUES (?, ?, ?)')
+      .run(String(label).trim(), String(prompt).trim(), maxPos + 1).lastInsertRowid;
+    return json(res, 200, { id });
+  }
+
+  const templateDupMatch = pathname.match(/^\/api\/admin\/templates\/(\d+)\/duplicate$/);
+  if (method === 'POST' && templateDupMatch) {
+    const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates').get().n;
+    if (count >= TEMPLATE_MAX) {
+      return json(res, 400, { error: `テンプレートは最大${TEMPLATE_MAX}個までです` });
+    }
+    const src = db.prepare('SELECT * FROM prompt_templates WHERE id = ?').get(Number(templateDupMatch[1]));
+    if (!src) return json(res, 404, { error: 'テンプレートが見つかりません' });
+    const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM prompt_templates').get().p;
+    const id = db.prepare('INSERT INTO prompt_templates (label, prompt, position) VALUES (?, ?, ?)')
+      .run(`${src.label}のコピー`, src.prompt, maxPos + 1).lastInsertRowid;
+    return json(res, 200, { id });
+  }
+
+  const templateMatch = pathname.match(/^\/api\/admin\/templates\/(\d+)$/);
+  if (method === 'PATCH' && templateMatch) {
+    const id = Number(templateMatch[1]);
+    const existing = db.prepare('SELECT * FROM prompt_templates WHERE id = ?').get(id);
+    if (!existing) return json(res, 404, { error: 'テンプレートが見つかりません' });
+    const { label, prompt } = await readBody(req);
+    if (!String(label || '').trim() || !String(prompt || '').trim()) {
+      return json(res, 400, { error: 'ラベルと内容を入力してください' });
+    }
+    db.prepare("UPDATE prompt_templates SET label = ?, prompt = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
+      .run(String(label).trim(), String(prompt).trim(), id);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === 'DELETE' && templateMatch) {
+    const id = Number(templateMatch[1]);
+    const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates').get().n;
+    if (count <= TEMPLATE_MIN) {
+      return json(res, 400, { error: `テンプレートは最低${TEMPLATE_MIN}個は必要です` });
+    }
+    db.prepare('DELETE FROM prompt_templates WHERE id = ?').run(id);
+    return json(res, 200, { ok: true });
+  }
 
   if (method === 'GET' && pathname === '/api/admin/overview') {
     const month = currentMonth();

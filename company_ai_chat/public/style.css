@@ -130,6 +130,13 @@ input, select, textarea { font: inherit; }
 .sidebar-footer .links { display: flex; gap: 8px; }
 .sidebar-footer .links button { flex: 1; }
 
+.my-ratio { display: flex; align-items: center; gap: 10px; margin: 2px 0 10px; }
+.my-ratio-legend { font-size: 11px; color: var(--ink-2); line-height: 1.6; }
+.my-ratio-legend > div:first-child { color: var(--ink); font-weight: 600; margin-bottom: 2px; }
+.my-ratio-legend .item { display: flex; align-items: center; gap: 5px; }
+.my-ratio-legend .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.my-ratio-legend .muted-note { color: var(--muted); font-size: 10px; margin-top: 2px; }
+
 /* ---------- チャット ---------- */
 .chat-header {
   padding: 12px 20px; border-bottom: 1px solid var(--grid); font-size: 14px; color: var(--ink-2);
@@ -182,6 +189,13 @@ input, select, textarea { font: inherit; }
 
 .empty-state { text-align: center; color: var(--muted); margin-top: 18vh; }
 .empty-state h2 { color: var(--ink); font-size: 24px; margin-bottom: 8px; }
+.template-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; max-width: 640px; margin-left: auto; margin-right: auto; }
+.template-btn {
+  background: var(--surface); border: 1px solid var(--grid); border-radius: 20px;
+  padding: 8px 16px; font-size: 13px; color: var(--ink); white-space: nowrap;
+}
+.template-btn:hover { border-color: var(--baseline); background: var(--sidebar); }
+.template-btn.template-more { color: var(--accent); border-style: dashed; }
 
 .composer-wrap { padding: 8px 20px 18px; }
 .composer {
@@ -263,6 +277,18 @@ table.data tr:last-child td { border-bottom: none; }
 .pill.unlocked { background: #e8f0fb; color: var(--accent-dark); }
 .pill.warn { background: var(--warning-bg); color: #8a6d00; }
 .pill.admin-role { background: #ece9fb; color: #4a3aa7; }
+
+.template-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.template-card { border: 1px solid var(--grid); border-radius: 10px; padding: 14px; }
+.template-card label { display: block; font-size: 11.5px; color: var(--muted); margin: 8px 0 4px; }
+.template-card label:first-child { margin-top: 0; }
+.template-card input, .template-card textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--grid); border-radius: 6px;
+  font-size: 13px; font-family: inherit; resize: vertical;
+}
+.template-card-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.template-card-actions button { padding: 6px 10px; font-size: 12.5px; }
+.template-card-actions button:disabled { opacity: 0.4; cursor: default; }
 
 .form-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
 .form-row input, .form-row select {
