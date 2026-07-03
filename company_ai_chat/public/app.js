@@ -16,9 +16,12 @@ const state = {
   pendingConfirm: null,  // { text, msg, routerError } 実行前確認の待機状態
   templates: [],         // チャット開始画面のテンプレート一覧
   templatesExpanded: false,
+  templateEditMode: false, // 管理者のみ: チャット画面内でのテンプレート編集モード
 };
 
 const TEMPLATE_VISIBLE_COUNT = 3; // これを超える分はドリルダウンで畳む
+const TEMPLATE_MIN_COUNT = 1;
+const TEMPLATE_MAX_COUNT = 5;
 
 // ---------- ユーティリティ ----------
 
@@ -447,7 +450,9 @@ function renderMessages() {
 
 // チャット未経験のユーザー向けのワンクリック定型文ボタン(管理者がテンプレート管理画面で編集)
 function renderTemplateButtons() {
-  if (!state.templates.length) return '';
+  const isAdmin = state.me && state.me.user.role === 'admin';
+  if (!state.templates.length && !isAdmin) return '';
+
   const visible = state.templatesExpanded ? state.templates : state.templates.slice(0, TEMPLATE_VISIBLE_COUNT);
   const hiddenCount = state.templates.length - visible.length;
   const buttons = visible.map((t) =>
@@ -458,12 +463,41 @@ function renderTemplateButtons() {
   } else if (state.templatesExpanded && state.templates.length > TEMPLATE_VISIBLE_COUNT) {
     more = `<button class="template-btn template-more" id="template-toggle">閉じる</button>`;
   }
-  return `<div class="template-row">${buttons}${more}</div>`;
+  const editToggle = isAdmin
+    ? `<button class="template-btn template-edit-toggle" id="template-edit-toggle">${
+        state.templateEditMode ? '✕ 編集を終了' : '✎ テンプレートを編集'}</button>`
+    : '';
+  const editor = isAdmin && state.templateEditMode ? renderTemplateEditorPanel() : '';
+  return `<div class="template-row">${buttons}${more}${editToggle}</div>${editor}`;
+}
+
+// 管理者専用: チャット画面その場でのテンプレート編集パネル(保存/リセット/複製/削除)
+function renderTemplateEditorPanel() {
+  const atMax = state.templates.length >= TEMPLATE_MAX_COUNT;
+  const atMin = state.templates.length <= TEMPLATE_MIN_COUNT;
+  return `
+    <div class="template-editor">
+      ${state.templates.map((t) => `
+        <div class="template-edit-card" data-tpl-id="${t.id}">
+          <input class="tpl-label" value="${esc(t.label)}" maxlength="20" placeholder="ボタンの名前">
+          <textarea class="tpl-prompt" rows="2" placeholder="送信される内容">${esc(t.prompt)}</textarea>
+          <div class="template-edit-actions">
+            <button class="btn-ghost" data-save-tpl="${t.id}">保存</button>
+            <button class="btn-ghost" data-reset-tpl="${t.id}">リセット</button>
+            <button class="btn-ghost" data-dup-tpl="${t.id}" ${atMax ? 'disabled' : ''}>複製</button>
+            <button class="btn-danger" data-del-tpl="${t.id}" ${atMin ? 'disabled' : ''}>削除</button>
+          </div>
+        </div>`).join('')}
+      <button class="btn-ghost template-add-btn" id="add-template" ${atMax ? 'disabled' : ''}>
+        ＋ 新規テンプレート追加(${state.templates.length}/${TEMPLATE_MAX_COUNT})
+      </button>
+    </div>`;
 }
 
 function attachTemplateButtonHandlers(root) {
   root.querySelectorAll('[data-template-id]').forEach((btn) => {
     btn.onclick = () => {
+      if (state.templateEditMode) return; // 編集モード中はクリックしても送信しない
       const tpl = state.templates.find((t) => t.id === Number(btn.dataset.templateId));
       if (!tpl) return;
       const input = document.getElementById('input');
@@ -476,6 +510,63 @@ function attachTemplateButtonHandlers(root) {
     toggle.onclick = () => {
       state.templatesExpanded = !state.templatesExpanded;
       renderMessages();
+    };
+  }
+  const editToggle = root.querySelector('#template-edit-toggle');
+  if (editToggle) {
+    editToggle.onclick = () => {
+      state.templateEditMode = !state.templateEditMode;
+      renderMessages();
+    };
+  }
+  if (!state.templateEditMode) return;
+
+  const refreshTemplates = async () => {
+    try { state.templates = await api('/api/templates'); } catch { /* 反映は次回でも可 */ }
+    renderMessages();
+  };
+  root.querySelectorAll('[data-save-tpl]').forEach((btn) => {
+    btn.onclick = async () => {
+      const card = btn.closest('.template-edit-card');
+      const label = card.querySelector('.tpl-label').value.trim();
+      const prompt = card.querySelector('.tpl-prompt').value.trim();
+      if (!label || !prompt) return alert('ボタンの名前と内容を入力してください');
+      try {
+        await api(`/api/admin/templates/${btn.dataset.saveTpl}`, { method: 'PATCH', body: { label, prompt } });
+        await refreshTemplates();
+      } catch (err) { alert(err.message); }
+    };
+  });
+  root.querySelectorAll('[data-reset-tpl]').forEach((btn) => {
+    btn.onclick = () => renderMessages(); // 保存前の未確定入力を破棄して再描画
+  });
+  root.querySelectorAll('[data-dup-tpl]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await api(`/api/admin/templates/${btn.dataset.dupTpl}/duplicate`, { method: 'POST' });
+        await refreshTemplates();
+      } catch (err) { alert(err.message); }
+    };
+  });
+  root.querySelectorAll('[data-del-tpl]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm('このテンプレートを削除しますか?')) return;
+      try {
+        await api(`/api/admin/templates/${btn.dataset.delTpl}`, { method: 'DELETE' });
+        await refreshTemplates();
+      } catch (err) { alert(err.message); }
+    };
+  });
+  const addBtn = root.querySelector('#add-template');
+  if (addBtn) {
+    addBtn.onclick = async () => {
+      try {
+        await api('/api/admin/templates', {
+          method: 'POST',
+          body: { label: '新しいテンプレート', prompt: 'ここに送信したい内容を入力してください' },
+        });
+        await refreshTemplates();
+      } catch (err) { alert(err.message); }
     };
   }
 }
@@ -661,7 +752,6 @@ async function renderAdmin() {
     ['dashboard', 'ダッシュボード'],
     ['depts', '部署・予算'],
     ['users', 'ユーザー'],
-    ['templates', 'テンプレート'],
   ];
   main.innerHTML = `
     <div class="admin-wrap"><div class="admin-inner">
@@ -677,8 +767,7 @@ async function renderAdmin() {
   const body = document.getElementById('admin-body');
   if (state.adminTab === 'dashboard') renderDashboard(body, d);
   else if (state.adminTab === 'depts') renderDepts(body, d);
-  else if (state.adminTab === 'users') renderUsers(body, d);
-  else renderTemplatesAdmin(body);
+  else renderUsers(body, d);
 }
 
 // --- ダッシュボード ---
@@ -1102,98 +1191,6 @@ function renderUsers(el, d) {
       alert(err.message);
     }
   };
-}
-
-// --- テンプレート管理タブ ---
-
-async function renderTemplatesAdmin(el) {
-  el.innerHTML = '<div class="panel">読み込み中…</div>';
-  let templates;
-  try {
-    templates = await api('/api/admin/templates');
-  } catch (err) {
-    el.innerHTML = `<div class="panel">⚠️ ${esc(err.message)}</div>`;
-    return;
-  }
-
-  const TEMPLATE_MAX = 5;
-  const atMax = templates.length >= TEMPLATE_MAX;
-  const atMin = templates.length <= 1;
-
-  el.innerHTML = `
-    <div class="panel">
-      <h3>チャット開始時のテンプレート</h3>
-      <p class="desc">
-        チャットに慣れていないユーザーでもワンクリックで使えるコピペ済みの定型文です。ボタンを押すと、
-        その内容がそのまま送信されてチャットが始まります。最低1個・最大${TEMPLATE_MAX}個まで登録できます
-        (現在 ${templates.length}/${TEMPLATE_MAX})。
-      </p>
-      <div class="template-cards">
-        ${templates.map((t) => `
-          <div class="template-card">
-            <label>ボタンに表示する名前</label>
-            <input class="tpl-label" value="${esc(t.label)}" maxlength="20">
-            <label>送信される内容</label>
-            <textarea class="tpl-prompt" rows="3">${esc(t.prompt)}</textarea>
-            <div class="template-card-actions">
-              <button class="btn-primary" data-save-tpl="${t.id}">保存</button>
-              <button class="btn-ghost" data-reset-tpl="${t.id}">リセット</button>
-              <button class="btn-ghost" data-dup-tpl="${t.id}" ${atMax ? 'disabled' : ''}>複製</button>
-              <button class="btn-danger" data-del-tpl="${t.id}" ${atMin ? 'disabled title="最低1個は必要です"' : ''}>削除</button>
-            </div>
-          </div>`).join('')}
-      </div>
-      <button class="btn-primary" id="add-template" ${atMax ? 'disabled' : ''} style="margin-top:14px">＋ 新規テンプレート追加</button>
-    </div>`;
-
-  const refresh = async () => {
-    try { state.templates = await api('/api/templates'); } catch { /* 反映は次回でも可 */ }
-    renderTemplatesAdmin(el);
-  };
-
-  el.querySelectorAll('[data-save-tpl]').forEach((btn) => {
-    btn.onclick = async () => {
-      const card = btn.closest('.template-card');
-      const label = card.querySelector('.tpl-label').value.trim();
-      const prompt = card.querySelector('.tpl-prompt').value.trim();
-      try {
-        await api(`/api/admin/templates/${btn.dataset.saveTpl}`, { method: 'PATCH', body: { label, prompt } });
-        await refresh();
-      } catch (err) { alert(err.message); }
-    };
-  });
-  el.querySelectorAll('[data-reset-tpl]').forEach((btn) => {
-    btn.onclick = () => renderTemplatesAdmin(el); // 再取得して未保存の編集を破棄
-  });
-  el.querySelectorAll('[data-dup-tpl]').forEach((btn) => {
-    btn.onclick = async () => {
-      try {
-        await api(`/api/admin/templates/${btn.dataset.dupTpl}/duplicate`, { method: 'POST' });
-        await refresh();
-      } catch (err) { alert(err.message); }
-    };
-  });
-  el.querySelectorAll('[data-del-tpl]').forEach((btn) => {
-    btn.onclick = async () => {
-      if (!confirm('このテンプレートを削除しますか?')) return;
-      try {
-        await api(`/api/admin/templates/${btn.dataset.delTpl}`, { method: 'DELETE' });
-        await refresh();
-      } catch (err) { alert(err.message); }
-    };
-  });
-  const addBtn = document.getElementById('add-template');
-  if (addBtn) {
-    addBtn.onclick = async () => {
-      try {
-        await api('/api/admin/templates', {
-          method: 'POST',
-          body: { label: '新しいテンプレート', prompt: 'ここに送信したい内容を入力してください' },
-        });
-        await refresh();
-      } catch (err) { alert(err.message); }
-    };
-  }
 }
 
 init();

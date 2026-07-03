@@ -203,6 +203,25 @@ input, select, textarea { font: inherit; }
 }
 .template-btn:hover { border-color: var(--baseline); background: var(--sidebar); }
 .template-btn.template-more { color: var(--accent); border-style: dashed; }
+.template-btn.template-edit-toggle { color: var(--accent); border-style: dashed; }
+
+.template-editor {
+  max-width: 640px; margin: 14px auto 0; display: flex; flex-direction: column; gap: 10px; text-align: left;
+}
+.template-edit-card { border: 1px solid var(--grid); border-radius: 10px; padding: 10px 12px; background: var(--surface); }
+.template-edit-card input, .template-edit-card textarea {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--grid); border-radius: 6px;
+  font-size: 13px; font-family: inherit; resize: vertical; margin-bottom: 6px; box-sizing: border-box;
+}
+.template-edit-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.template-edit-actions button { padding: 5px 10px; font-size: 12px; }
+.template-edit-actions button:disabled { opacity: 0.4; cursor: default; }
+.template-add-btn { align-self: flex-start; font-size: 12.5px; }
+
+@media (max-width: 720px) {
+  .template-row, .template-editor { max-width: 100%; padding: 0 12px; box-sizing: border-box; }
+  .template-btn { font-size: 12.5px; padding: 7px 12px; }
+}
 
 .composer-wrap { padding: 8px 20px 18px; }
 .composer {
