@@ -254,7 +254,6 @@ function render() {
   const dept = me.department;
   // 総額(月予算)は見せず、今期(3日間)の利用ペースだけを見せる
   const periodRatio = dept && dept.period_budget_jpy > 0 ? Math.min(1, dept.period_used_jpy / dept.period_budget_jpy) : 0;
-  const meterClass = dept && dept.locked ? 'over' : periodRatio >= 0.8 ? 'warn' : '';
 
   $app.innerHTML = `
     <div class="layout">
@@ -270,13 +269,13 @@ function render() {
             </div>
           </div>
           ${dept ? `
-          <div class="budget-meter">
-            <div class="meter-label">
-              <span>利用ペース(${dept.period_number}/${dept.period_total}期)</span>
-              <span>${dept.locked ? '🔒 制限中' : '利用中'}</span>
+          <div class="my-ratio budget-ring-row">
+            <div id="budget-ring"></div>
+            <div class="my-ratio-legend">
+              <div>利用ペース(${dept.period_number}/${dept.period_total}期)</div>
+              <span class="item">${dept.locked ? '🔒 制限中' : '利用中'}</span>
+              <div class="muted-note">次の期間: ${dept.next_period_label}〜</div>
             </div>
-            <div class="meter-track"><div class="meter-fill ${meterClass}" style="width:${(periodRatio * 100).toFixed(1)}%"></div></div>
-            <div class="meter-note">次の期間: ${dept.next_period_label}〜</div>
           </div>` : ''}
           ${me.my_private_stats && me.my_private_stats.judged > 0 ? `
           <div class="my-ratio">
@@ -304,6 +303,10 @@ function render() {
   const myDonut = document.getElementById('my-donut');
   if (myDonut) {
     myDonut.innerHTML = workPrivateDonut(me.my_private_stats.work, me.my_private_stats.private, { size: 64, label: '' });
+  }
+  const budgetRing = document.getElementById('budget-ring');
+  if (budgetRing) {
+    budgetRing.innerHTML = usageRing(periodRatio, { size: 64, locked: dept.locked });
   }
 
   document.getElementById('new-chat').onclick = async () => {
@@ -971,6 +974,28 @@ function workPrivateDonut(work, priv, opts = {}) {
       data-tip="プライベート ${priv}件"></circle>
     <text x="${cx}" y="${cy - (label ? fontSmall * 0.3 : -fontBig * 0.35)}" text-anchor="middle" font-size="${fontBig}" font-weight="700" fill="#0b0b0b">${privPct}%</text>
     ${label ? `<text x="${cx}" y="${cy + fontSmall + 4}" text-anchor="middle" font-size="${fontSmall}" fill="#898781">${esc(label)}</text>` : ''}
+  </svg>`;
+}
+
+// 利用ペースのリング(未使用=グレー、使用=青→黄→オレンジ→赤で段階的に警告)
+function usageRing(ratio, opts = {}) {
+  const size = opts.size || 64;
+  const stroke = opts.stroke || Math.round(size * 0.16);
+  const fontBig = opts.fontBig || Math.round(size * 0.24);
+  const locked = opts.locked || false;
+  const clamped = Math.max(0, Math.min(1, ratio));
+  const cx = size / 2, cy = size / 2, r = size / 2 - stroke / 2 - 2;
+  const circumference = 2 * Math.PI * r;
+  const usedLen = clamped * circumference;
+  const color = locked || clamped >= 0.9 ? '#d03b3b'
+    : clamped >= 0.75 ? '#e2811a'
+    : clamped >= 0.5 ? '#eda100'
+    : '#2a78d6';
+  return `<svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="利用ペース">
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#e1e0d9" stroke-width="${stroke}"></circle>
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-linecap="round"
+      stroke-dasharray="${usedLen} ${circumference}" stroke-dashoffset="0" transform="rotate(-90 ${cx} ${cy})"></circle>
+    <text x="${cx}" y="${cy + fontBig * 0.35}" text-anchor="middle" font-size="${fontBig}" font-weight="700" fill="#0b0b0b">${Math.round(clamped * 100)}%</text>
   </svg>`;
 }
 
