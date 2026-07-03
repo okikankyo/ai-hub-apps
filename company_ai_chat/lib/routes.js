@@ -594,6 +594,13 @@ async function handleAdmin(req, res, method, pathname) {
     }
     if (body.password) {
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.password)), id);
+    } else if (body.password === '') {
+      // 明示的な空文字はパスワードログインを無効化する(Googleログイン専用にする)
+      db.prepare("UPDATE users SET password_hash = '' WHERE id = ?").run(id);
+    }
+    if (body.email !== undefined) {
+      // Googleログイン時、このメールアドレスと一致すれば既存ユーザーに自動で紐付く
+      db.prepare('UPDATE users SET email = ? WHERE id = ?').run(String(body.email) || null, id);
     }
     return json(res, 200, { ok: true });
   }
