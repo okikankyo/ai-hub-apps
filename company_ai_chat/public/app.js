@@ -14,9 +14,9 @@ const state = {
   adminData: null,
   modelPref: 'auto',     // 'auto' | 'light' | 'heavy'
   pendingConfirm: null,  // { text, msg, routerError } 実行前確認の待機状態
-  templates: [],         // チャット開始画面のテンプレート一覧
+  templates: [],         // チャット開始画面のテンプレート一覧(ユーザー個人用)
   templatesExpanded: false,
-  templateEditMode: false, // 管理者のみ: チャット画面内でのテンプレート編集モード
+  templateEditMode: false, // チャット画面内でのテンプレート編集モード
   templateSnapshot: null,  // 編集モードに入った時点のテンプレート一覧(「リセット」で戻す先)
   abortController: null,   // 生成中の「停止」ボタン用
 };
@@ -495,10 +495,9 @@ function renderMessages() {
   scrollToBottom();
 }
 
-// チャット未経験のユーザー向けのワンクリック定型文ボタン(管理者がテンプレート管理画面で編集)
+// チャット未経験のユーザー向けのワンクリック定型文ボタン(各ユーザーが自分用に編集)
 function renderTemplateButtons() {
-  const isAdmin = state.me && state.me.user.role === 'admin';
-  if (!state.templates.length && !isAdmin) return '';
+  if (!state.templates.length) return '';
 
   const visible = state.templatesExpanded ? state.templates : state.templates.slice(0, TEMPLATE_VISIBLE_COUNT);
   const hiddenCount = state.templates.length - visible.length;
@@ -510,15 +509,13 @@ function renderTemplateButtons() {
   } else if (state.templatesExpanded && state.templates.length > TEMPLATE_VISIBLE_COUNT) {
     more = `<button class="template-btn template-more" id="template-toggle">閉じる</button>`;
   }
-  const editToggle = isAdmin
-    ? `<button class="template-btn template-edit-toggle" id="template-edit-toggle">${
-        state.templateEditMode ? '✕ 編集を終了' : '✎ テンプレートを編集'}</button>`
-    : '';
-  const editor = isAdmin && state.templateEditMode ? renderTemplateEditorPanel() : '';
+  const editToggle = `<button class="template-btn template-edit-toggle" id="template-edit-toggle">${
+    state.templateEditMode ? '✕ 編集を終了' : '✎ テンプレートを編集'}</button>`;
+  const editor = state.templateEditMode ? renderTemplateEditorPanel() : '';
   return `<div class="template-row">${buttons}${more}${editToggle}</div>${editor}`;
 }
 
-// 管理者専用: チャット画面その場でのテンプレート編集パネル(保存/リセット/複製/削除)
+// チャット画面その場でのテンプレート編集パネル(保存/リセット/複製/削除、自分の分のみ)
 function renderTemplateEditorPanel() {
   const atMax = state.templates.length >= TEMPLATE_MAX_COUNT;
   const atMin = state.templates.length <= TEMPLATE_MIN_COUNT;
@@ -583,7 +580,7 @@ function attachTemplateButtonHandlers(root) {
       const prompt = card.querySelector('.tpl-prompt').value.trim();
       if (!label || !prompt) return alert('ボタンの名前と内容を入力してください');
       try {
-        await api(`/api/admin/templates/${btn.dataset.saveTpl}`, { method: 'PATCH', body: { label, prompt } });
+        await api(`/api/templates/${btn.dataset.saveTpl}`, { method: 'PATCH', body: { label, prompt } });
         await refreshTemplates();
       } catch (err) { alert(err.message); }
     };
@@ -596,12 +593,12 @@ function attachTemplateButtonHandlers(root) {
       const original = (state.templateSnapshot || []).find((t) => t.id === id);
       try {
         if (original) {
-          await api(`/api/admin/templates/${id}`, {
+          await api(`/api/templates/${id}`, {
             method: 'PATCH', body: { label: original.label, prompt: original.prompt },
           });
         } else {
           // 編集モード中に新規追加したテンプレートは、リセットで削除して無かった状態に戻す
-          await api(`/api/admin/templates/${id}`, { method: 'DELETE' });
+          await api(`/api/templates/${id}`, { method: 'DELETE' });
         }
         await refreshTemplates();
       } catch (err) { alert(err.message); }
@@ -610,7 +607,7 @@ function attachTemplateButtonHandlers(root) {
   root.querySelectorAll('[data-dup-tpl]').forEach((btn) => {
     btn.onclick = async () => {
       try {
-        await api(`/api/admin/templates/${btn.dataset.dupTpl}/duplicate`, { method: 'POST' });
+        await api(`/api/templates/${btn.dataset.dupTpl}/duplicate`, { method: 'POST' });
         await refreshTemplates();
       } catch (err) { alert(err.message); }
     };
@@ -619,7 +616,7 @@ function attachTemplateButtonHandlers(root) {
     btn.onclick = async () => {
       if (!confirm('このテンプレートを削除しますか?')) return;
       try {
-        await api(`/api/admin/templates/${btn.dataset.delTpl}`, { method: 'DELETE' });
+        await api(`/api/templates/${btn.dataset.delTpl}`, { method: 'DELETE' });
         await refreshTemplates();
       } catch (err) { alert(err.message); }
     };
@@ -628,7 +625,7 @@ function attachTemplateButtonHandlers(root) {
   if (addBtn) {
     addBtn.onclick = async () => {
       try {
-        await api('/api/admin/templates', {
+        await api('/api/templates', {
           method: 'POST',
           body: { label: '新しいテンプレート', prompt: 'ここに送信したい内容を入力してください' },
         });

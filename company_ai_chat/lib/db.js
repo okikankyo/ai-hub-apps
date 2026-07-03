@@ -91,9 +91,10 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
 
-  -- チャット開始時にワンクリックで送信できる定型文(管理者が管理、最少1件・最大5件)
+  -- チャット開始時にワンクリックで送信できる定型文(ユーザーごとに管理、最少1件・最大5件)
   CREATE TABLE IF NOT EXISTS prompt_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id),
     label TEXT NOT NULL,
     prompt TEXT NOT NULL,
     position INTEGER NOT NULL DEFAULT 0,
@@ -127,6 +128,14 @@ db.exec(`
   if (!deptCols.includes('advance_month')) db.exec('ALTER TABLE departments ADD COLUMN advance_month TEXT');
   // ユーザー自身が押せる「リセット」。対象期間(YYYY-MM-P{0-9})中だけロックを解除する
   if (!deptCols.includes('self_unlock_period')) db.exec('ALTER TABLE departments ADD COLUMN self_unlock_period TEXT');
+
+  // テンプレートを全体共有から「ユーザーごとの個人管理」に変更
+  const tplCols = db.prepare('PRAGMA table_info(prompt_templates)').all().map((c) => c.name);
+  if (!tplCols.includes('user_id')) {
+    db.exec('ALTER TABLE prompt_templates ADD COLUMN user_id INTEGER REFERENCES users(id)');
+    // 旧・全員共有だった初期テンプレートは持ち主がいないので破棄する(各ユーザーは初回アクセス時に個人用として再生成される)
+    db.exec('DELETE FROM prompt_templates WHERE user_id IS NULL');
+  }
 }
 
 function hashPassword(password) {
@@ -168,35 +177,29 @@ function seed() {
 
 seed();
 
-// テンプレートは既存DBにも(初回のみ)用意する
-{
-  const templateCount = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates').get().n;
-  if (templateCount === 0) {
-    const insTemplate = db.prepare('INSERT INTO prompt_templates (label, prompt, position) VALUES (?, ?, ?)');
-    insTemplate.run(
-      '議事録を作成',
-      '以下の会議メモから、日時・参加者・議題・決定事項・次のアクションをまとめた議事録を作成してください。\n\n[ここに会議メモを貼り付けてください]',
-      0
-    );
-    insTemplate.run(
-      '画像作成',
-      'このチャットでは画像生成をお願いします。\n' +
-        '画像生成にはChatGPTの画像生成機能を使用してください。\n\n' +
-        '生成前に以下を確認してください。\n\n' +
-        '1. 用途・シーン\n' +
-        '2. テイスト(リアル/イラスト/ポップ/シンプルなど)\n' +
-        '3. 入れたい要素・色\n' +
-        '4. 縦横比(正方形/横長/縦長)\n\n' +
-        '確認したら、まず画像案を出してください。\n' +
-        'OKなら生成してください。\n' +
-        '気に入らなければ「こうして」で修正します。\n\n' +
-        '文字・ロゴ・ラベルについて:\n' +
-        '・画像内の文字は勝手に生成・修正しないでください\n' +
-        '・日本語が必要な場合は明示的に指定します\n' +
-        '・商品ラベル・看板・ロゴ等の文字は、意図的に省略するかぼかしてください',
-      1
-    );
-  }
-}
+// 各ユーザーが初めてテンプレートを開いた時に個人用として複製する初期セット
+const DEFAULT_TEMPLATES = [
+  {
+    label: '議事録を作成',
+    prompt: '以下の会議メモから、日時・参加者・議題・決定事項・次のアクションをまとめた議事録を作成してください。\n\n[ここに会議メモを貼り付けてください]',
+  },
+  {
+    label: '画像作成',
+    prompt: 'このチャットでは画像生成をお願いします。\n' +
+      '画像生成にはChatGPTの画像生成機能を使用してください。\n\n' +
+      '生成前に以下を確認してください。\n\n' +
+      '1. 用途・シーン\n' +
+      '2. テイスト(リアル/イラスト/ポップ/シンプルなど)\n' +
+      '3. 入れたい要素・色\n' +
+      '4. 縦横比(正方形/横長/縦長)\n\n' +
+      '確認したら、まず画像案を出してください。\n' +
+      'OKなら生成してください。\n' +
+      '気に入らなければ「こうして」で修正します。\n\n' +
+      '文字・ロゴ・ラベルについて:\n' +
+      '・画像内の文字は勝手に生成・修正しないでください\n' +
+      '・日本語が必要な場合は明示的に指定します\n' +
+      '・商品ラベル・看板・ロゴ等の文字は、意図的に省略するかぼかしてください',
+  },
+];
 
-module.exports = { db, hashPassword, verifyPassword, currentMonth, DATA_DIR };
+module.exports = { db, hashPassword, verifyPassword, currentMonth, DATA_DIR, DEFAULT_TEMPLATES };
