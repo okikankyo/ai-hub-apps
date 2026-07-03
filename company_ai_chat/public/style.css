@@ -61,6 +61,13 @@ input, select, textarea { font: inherit; }
   color: var(--accent); font-size: 12.5px; margin-top: 10px; padding: 4px;
 }
 .link-btn:hover { text-decoration: underline; }
+
+.applied-summary {
+  background: var(--sidebar); border-radius: 8px; padding: 10px 14px; margin: 14px 0;
+  font-size: 13px; text-align: left;
+}
+.applied-summary div { display: flex; justify-content: space-between; padding: 3px 0; }
+.applied-summary span { color: var(--muted); }
 .divider {
   display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 18px 0 4px;
 }

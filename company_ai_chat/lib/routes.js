@@ -8,6 +8,7 @@ const { db, hashPassword, currentMonth } = require('./db');
 const auth = require('./auth');
 const openai = require('./openai');
 const google = require('./google_auth');
+const mailer = require('./mailer');
 
 const PRIVATE_RATIO_WARN = Number(process.env.PRIVATE_RATIO_WARN || 0.3); // 警告する私的利用率
 const PRIVATE_MIN_COUNT = Number(process.env.PRIVATE_MIN_COUNT || 5);     // 警告に必要な最低判定数
@@ -136,6 +137,35 @@ function requireAdmin(req, res) {
   return user;
 }
 
+// ---- メール通知 ----
+
+async function notifyAdminsOfNewApplication(user) {
+  const admins = db.prepare(
+    "SELECT email FROM users WHERE role = 'admin' AND status = 'active' AND disabled = 0 AND email IS NOT NULL"
+  ).all();
+  const url = process.env.BASE_URL || '';
+  const body =
+    `社内AIチャットに利用申請がありました。\n\n` +
+    `氏名: ${user.requested_name || user.display_name}\n` +
+    `メール: ${user.email}\n` +
+    `希望部署: ${user.requested_department || '(未記入)'}\n\n` +
+    `管理画面のユーザータブから、部署を割り当てて承認してください。\n${url}`;
+  for (const a of admins) {
+    await mailer.sendMail(a.email, '【社内AIチャット】新規ユーザーの承認依頼', body);
+  }
+}
+
+async function notifyUserApproved(user) {
+  if (!user.email) return;
+  const url = process.env.BASE_URL || '';
+  await mailer.sendMail(
+    user.email,
+    '【社内AIチャット】アカウントが承認されました',
+    `${user.requested_name || user.display_name} 様\n\n` +
+      `社内AIチャットのご利用が承認されました。下記URLからログインしてご利用いただけます。\n${url}`
+  );
+}
+
 // ---- Google ログイン ----
 
 function redirect(res, location, extraCookie) {
@@ -239,6 +269,7 @@ async function handle(req, res, method, pathname, url) {
       user: {
         id: user.id, username: user.username, display_name: user.display_name,
         role: user.role, status: user.status, email: user.email,
+        requested_name: user.requested_name, requested_department: user.requested_department,
       },
       department: dept,
       warnings,
@@ -247,6 +278,21 @@ async function handle(req, res, method, pathname, url) {
       mock_mode: openai.MOCK,
       budget_alert: dept && !dept.locked && dept.ratio >= BUDGET_ALERT_RATIO,
     });
+  }
+
+  // 承認待ちユーザーが氏名・希望部署を自己申告する(この時点で管理者に通知メール)
+  if (method === 'POST' && pathname === '/api/apply') {
+    const { name, department } = await readBody(req);
+    const requestedName = String(name || '').trim().slice(0, 50);
+    const requestedDept = String(department || '').trim().slice(0, 50);
+    if (!requestedName || !requestedDept) {
+      return json(res, 400, { error: '氏名と希望部署を入力してください' });
+    }
+    db.prepare('UPDATE users SET requested_name = ?, requested_department = ? WHERE id = ?')
+      .run(requestedName, requestedDept, user.id);
+    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    notifyAdminsOfNewApplication(updated).catch((err) => console.error('[mailer]', err.message));
+    return json(res, 200, { ok: true });
   }
 
   if (method === 'POST' && pathname.startsWith('/api/warnings/') && pathname.endsWith('/ack')) {
@@ -548,7 +594,8 @@ async function handleAdmin(req, res, method, pathname) {
     const departments = db.prepare('SELECT * FROM departments ORDER BY id').all().map(deptStatus);
     const users = db.prepare(`
       SELECT u.id, u.username, u.display_name, u.role, u.disabled, u.department_id, u.created_at,
-             u.email, u.status, (u.google_sub IS NOT NULL) AS is_google, d.name AS department_name
+             u.email, u.status, (u.google_sub IS NOT NULL) AS is_google, d.name AS department_name,
+             u.requested_name, u.requested_department
       FROM users u LEFT JOIN departments d ON d.id = u.department_id ORDER BY u.id
     `).all().map((u) => {
       const stats = privateStats(u.id, month);
@@ -678,6 +725,10 @@ async function handleAdmin(req, res, method, pathname) {
     // 承認: status を active にする(通常は department_id とセットで送られる)
     if (body.status === 'active' || body.status === 'pending') {
       db.prepare('UPDATE users SET status = ? WHERE id = ?').run(body.status, id);
+      if (body.status === 'active' && target.status === 'pending') {
+        const approved = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+        notifyUserApproved(approved).catch((err) => console.error('[mailer]', err.message));
+      }
     }
     if (body.password) {
       db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.password)), id);

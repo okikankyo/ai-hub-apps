@@ -112,6 +112,9 @@ db.exec(`
     db.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL');
+  // 承認待ちユーザーが自己申告する氏名・希望部署(自由記述、管理者の承認判断の参考用)
+  if (!userCols.includes('requested_name')) db.exec('ALTER TABLE users ADD COLUMN requested_name TEXT');
+  if (!userCols.includes('requested_department')) db.exec('ALTER TABLE users ADD COLUMN requested_department TEXT');
 
   // 応答に使ったモデルの記録(ルーティング結果の表示用)
   const msgCols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);

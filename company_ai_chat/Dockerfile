@@ -1,10 +1,10 @@
-# 依存パッケージなし(Node標準機能のみ)なので npm install は不要。
 # node:sqlite を使うため Node 22.5+ が必須。
 FROM node:22-alpine
 
 WORKDIR /app
 
 COPY package.json ./
+RUN npm install --omit=dev
 COPY server.js ./
 COPY lib ./lib
 COPY public ./public

@@ -94,22 +94,85 @@ async function init() {
 // Google ログイン直後の未承認ユーザー向け画面
 function renderPending() {
   const me = state.me;
+  const applied = Boolean(me.user.requested_name && me.user.requested_department);
+
   $app.innerHTML = `
     <div class="login-wrap">
       <div class="login-card" style="text-align:center">
         <div style="font-size:40px">⏳</div>
         <h1 style="font-size:19px">承認待ちです</h1>
+        ${applied ? `
+        <p style="color:var(--ink-2);font-size:13.5px;line-height:1.8">
+          申請を送信しました。管理者が確認して承認するまで、このままお待ちください。<br>
+          このページを開いたままにしておけば、承認され次第自動的に利用画面に切り替わります。
+        </p>
+        <div class="applied-summary">
+          <div><span>氏名</span>${esc(me.user.requested_name)}</div>
+          <div><span>希望部署</span>${esc(me.user.requested_department)}</div>
+        </div>
+        <button class="link-btn" id="edit-apply">内容を修正する</button>
+        ` : `
         <p style="color:var(--ink-2);font-size:13.5px;line-height:1.8">
           ${esc(me.user.display_name)} さん(${esc(me.user.email || me.user.username)})のアカウントは作成されました。<br>
-          管理者が部署を割り当てて承認すると利用できるようになります。
+          お手数ですが、下記に氏名と希望部署を入力して送信してください。管理者が確認のうえ承認します。
         </p>
-        <button class="btn-ghost" id="btn-logout" style="margin-top:10px">ログアウト</button>
+        <form id="apply-form" style="text-align:left">
+          <label>氏名</label>
+          <input name="name" value="${esc(me.user.requested_name || me.user.display_name || '')}" required>
+          <label>希望部署(自由記述)</label>
+          <input name="department" placeholder="例: 営業部" value="${esc(me.user.requested_department || '')}" required>
+          <button class="btn-primary" type="submit" style="width:100%;margin-top:16px">申請する</button>
+          <div class="login-error" id="apply-error"></div>
+        </form>
+        `}
+        <button class="btn-ghost" id="btn-logout" style="margin-top:14px">ログアウト</button>
       </div>
     </div>`;
+
   document.getElementById('btn-logout').onclick = async () => {
     await api('/api/logout', { method: 'POST' });
     location.reload();
   };
+
+  const applyForm = document.getElementById('apply-form');
+  if (applyForm) {
+    applyForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(applyForm);
+      try {
+        await api('/api/apply', { method: 'POST', body: { name: fd.get('name'), department: fd.get('department') } });
+        await loadMe();
+        renderPending();
+        startPendingPoll();
+      } catch (err) {
+        document.getElementById('apply-error').textContent = err.message;
+      }
+    });
+  }
+  const editBtn = document.getElementById('edit-apply');
+  if (editBtn) {
+    editBtn.onclick = () => {
+      me.user.requested_name = '';
+      me.user.requested_department = '';
+      renderPending();
+    };
+  }
+
+  if (applied) startPendingPoll();
+}
+
+// 承認待ち中、承認されたら自動的に通常画面へ切り替える
+let pendingPollTimer = null;
+function startPendingPoll() {
+  if (pendingPollTimer) return;
+  pendingPollTimer = setInterval(async () => {
+    const ok = await loadMe();
+    if (ok && state.me.user.status !== 'pending') {
+      clearInterval(pendingPollTimer);
+      pendingPollTimer = null;
+      init();
+    }
+  }, 10000);
 }
 
 // ---------- ログイン ----------
@@ -920,12 +983,14 @@ function renderUsers(el, d) {
   const pendingPanel = pending.length === 0 ? '' : `
     <div class="panel" style="border-color:var(--warning-border);background:#fffdf5">
       <h3>🔔 承認待ちのユーザー(${pending.length}名)</h3>
-      <p class="desc">Googleログインで新規登録されたユーザーです。部署を選んで承認するとチャットを利用できるようになります。</p>
+      <p class="desc">Googleログインで新規登録されたユーザーです。申請された希望部署を参考に、部署を選んで承認してください。</p>
       <table class="data">
-        <tr><th>ユーザー</th><th>メール</th><th>登録日時</th><th>部署を割り当てて承認</th><th></th></tr>
+        <tr><th>ユーザー</th><th>メール</th><th>申請した氏名</th><th>希望部署</th><th>登録日時</th><th>部署を割り当てて承認</th><th></th></tr>
         ${pending.map((u) => `<tr>
           <td>${esc(u.display_name)}</td>
           <td>${esc(u.email || '')}</td>
+          <td>${u.requested_name ? esc(u.requested_name) : '<span class="muted-note">未申請</span>'}</td>
+          <td>${u.requested_department ? esc(u.requested_department) : '<span class="muted-note">未申請</span>'}</td>
           <td>${esc(u.created_at || '')}</td>
           <td>
             <select data-approve-dept="${u.id}">

@@ -1,7 +1,7 @@
 # 社内AIチャット (company_ai_chat)
 
 OpenAI API(ChatGPT のモデル)を使った自社向けチャット Web アプリです。
-**Node.js 22 以上だけで動作し、npm install 不要**(外部依存パッケージなし)です。
+**Node.js 22 以上で動作**し、依存パッケージはメール送信用の `nodemailer` のみです(`npm install` が必要)。
 
 ## 主な機能
 
@@ -19,6 +19,9 @@ OpenAI API(ChatGPT のモデル)を使った自社向けチャット Web アプ�
 | モデル自動ルーティング | メッセージ内容から最適なモデルを自動選択(下表)。使用モデルは各応答の下にバッジ表示。手動で軽量/高性能の固定も可能 |
 | 画像生成 | 画像生成の依頼を検知すると画像モデルで生成し、チャット内に表示 |
 | 実行前の人間確認 | 送信・削除・金額・個人情報が絡む依頼は、確認ダイアログで本人が承認してから高性能モデルで処理 |
+| 個人の業務/プライベート比率 | サイドバーに本人の比率をミニ円グラフで表示(管理ダッシュボードには全社版も表示) |
+| チャット開始テンプレート | 管理画面で1〜5個の定型文(ラベル+内容)を管理でき、ユーザーはワンクリックで送信・チャット開始できる |
+| 承認申請フォーム + メール通知 | Google初回ログイン時に氏名・希望部署を入力して申請。管理者に通知メールが届き、承認すると申請者にも通知メールが届く。承認待ち画面は自動更新され、承認後すぐに利用画面に切り替わる |
 
 ## モデルルーティング
 
@@ -38,6 +41,7 @@ OpenAI API(ChatGPT のモデル)を使った自社向けチャット Web アプ�
 
 ```bash
 cd company_ai_chat
+npm install
 OPENAI_API_KEY=sk-xxxx node server.js
 # → http://localhost:8787
 ```
@@ -107,7 +111,8 @@ OPENAI_API_KEY=sk-xxxx node server.js
 | `PRIVATE_RATIO_WARN` | `0.3` | 自動警告を出す私的利用率の閾値 |
 | `PRIVATE_MIN_COUNT` | `5` | 自動警告に必要な月間の最低判定件数 |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | (なし=無効) | Google ログイン用 OAuth クライアント |
-| `BASE_URL` | `http://localhost:8787` | リダイレクト URI の生成に使う公開 URL |
+| `BASE_URL` | `http://localhost:8787` | リダイレクト URI・通知メール内リンクの生成に使う公開 URL |
+| `SMTP_USER` / `SMTP_PASS` | (なし=無効) | 通知メール送信用の Gmail アドレスと[アプリパスワード](https://myaccount.google.com/apppasswords) |
 | `PORT` | `8787` | 待ち受けポート |
 | `DATA_DIR` | `./data` | SQLite データベースの保存先 |
 | `SYSTEM_PROMPT` | (社内アシスタント既定文) | チャットのシステムプロンプト |
@@ -125,7 +130,7 @@ OPENAI_API_KEY=sk-xxxx node server.js
 company_ai_chat/
 ├── server.js          # エントリポイント(HTTP サーバー + 静的配信)
 ├── Dockerfile          # Coolify 等へのデプロイ用
-├── package.json        # メタデータ(依存パッケージなし)
+├── package.json        # メタデータ・依存パッケージ(nodemailer)
 ├── lib/
 │   ├── db.js          # SQLite (node:sqlite) スキーマ・シード
 │   ├── auth.js        # セッション認証
