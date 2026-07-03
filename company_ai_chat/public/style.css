@@ -328,6 +328,23 @@ table.data tr:last-child td { border-bottom: none; }
   white-space: nowrap;
 }
 
+.mobile-menu-btn {
+  display: none; background: none; border: none; font-size: 20px; line-height: 1;
+  padding: 4px 8px; cursor: pointer; color: var(--ink); flex: none;
+}
+.sidebar-backdrop { display: none; }
+
 @media (max-width: 720px) {
-  .sidebar { display: none; }
+  .mobile-menu-btn { display: inline-flex; }
+  .chat-header { gap: 10px; }
+  .sidebar {
+    position: fixed; top: 0; left: 0; height: 100%; width: 82%; max-width: 300px;
+    z-index: 60; transform: translateX(-100%); transition: transform 0.22s ease;
+    box-shadow: 2px 0 16px rgba(0,0,0,0.18);
+  }
+  .sidebar.mobile-open { transform: translateX(0); }
+  .sidebar-backdrop {
+    display: none; position: fixed; inset: 0; background: rgba(11,11,11,0.4); z-index: 55;
+  }
+  .sidebar-backdrop.show { display: block; }
 }

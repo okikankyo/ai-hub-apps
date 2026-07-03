@@ -238,6 +238,16 @@ async function loadConversations() {
   state.conversations = await api('/api/conversations');
 }
 
+// モバイル幅でのサイドバー(会話履歴)開閉。PC幅では見た目に影響しない。
+function openMobileSidebar() {
+  document.querySelector('.sidebar')?.classList.add('mobile-open');
+  document.getElementById('sidebar-backdrop')?.classList.add('show');
+}
+function closeMobileSidebar() {
+  document.querySelector('.sidebar')?.classList.remove('mobile-open');
+  document.getElementById('sidebar-backdrop')?.classList.remove('show');
+}
+
 function render() {
   const me = state.me;
   const dept = me.department;
@@ -281,9 +291,12 @@ function render() {
           </div>
         </div>
       </nav>
+      <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <main class="main" id="main"></main>
     </div>
     <div class="chart-tooltip" id="chart-tooltip"></div>`;
+
+  document.getElementById('sidebar-backdrop').onclick = closeMobileSidebar;
 
   const myDonut = document.getElementById('my-donut');
   if (myDonut) {
@@ -295,6 +308,7 @@ function render() {
     state.messages = [];
     state.pendingConfirm = null;
     state.view = 'chat';
+    closeMobileSidebar();
     render();
   };
   document.getElementById('btn-logout').onclick = async () => {
@@ -304,6 +318,7 @@ function render() {
   const adminBtn = document.getElementById('btn-admin');
   if (adminBtn) adminBtn.onclick = () => {
     state.view = state.view === 'admin' ? 'chat' : 'admin';
+    closeMobileSidebar();
     render();
   };
 
@@ -325,6 +340,7 @@ function renderConvList() {
       state.currentConvId = Number(item.dataset.id);
       state.view = 'chat';
       state.pendingConfirm = null;
+      closeMobileSidebar();
       state.messages = await api(`/api/conversations/${state.currentConvId}/messages`);
       render();
     };
@@ -364,6 +380,7 @@ function renderChat() {
 
   document.getElementById('main').innerHTML = `
     <div class="chat-header">
+      <button class="mobile-menu-btn" id="mobile-menu-btn" title="メニュー" aria-label="メニュー">☰</button>
       <span>${state.currentConvId ? esc((state.conversations.find((c) => c.id === state.currentConvId) || {}).title || '') : '新しいチャット'}</span>
       ${me.mock_mode ? '<span class="mock-badge">モックモード(APIキー未設定)</span>' : ''}
     </div>
@@ -399,6 +416,7 @@ function renderChat() {
       render();
     };
   });
+  document.getElementById('mobile-menu-btn').onclick = openMobileSidebar;
 
   if (locked) return;
 
@@ -776,7 +794,10 @@ async function renderAdmin() {
   ];
   main.innerHTML = `
     <div class="admin-wrap"><div class="admin-inner">
-      <div class="admin-header"><h1>管理画面 <small style="font-weight:400;color:var(--muted)">${esc(d.month)}</small></h1></div>
+      <div class="admin-header">
+        <button class="mobile-menu-btn" id="mobile-menu-btn" title="メニュー" aria-label="メニュー">☰</button>
+        <h1>管理画面 <small style="font-weight:400;color:var(--muted)">${esc(d.month)}</small></h1>
+      </div>
       <div class="tabs">${tabs.map(([k, label]) =>
         `<button class="tab ${state.adminTab === k ? 'active' : ''}" data-tab="${k}">${label}</button>`).join('')}
       </div>
@@ -785,6 +806,7 @@ async function renderAdmin() {
   main.querySelectorAll('[data-tab]').forEach((b) => {
     b.onclick = () => { state.adminTab = b.dataset.tab; renderAdmin(); };
   });
+  document.getElementById('mobile-menu-btn').onclick = openMobileSidebar;
   const body = document.getElementById('admin-body');
   if (state.adminTab === 'dashboard') renderDashboard(body, d);
   else if (state.adminTab === 'depts') renderDepts(body, d);
