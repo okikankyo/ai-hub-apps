@@ -15,6 +15,11 @@ const PRIVATE_MIN_COUNT = Number(process.env.PRIVATE_MIN_COUNT || 5);     // 警
 const BUDGET_ALERT_RATIO = 0.8;                                           // 予算アラート閾値
 
 // ---- 予算・ロック関連 ----
+// 月の予算を「1ヶ月30日・3日ごと」で10期間に分割し、少しずつ解放していくペース配分方式。
+// 総額(1500円など)をユーザーには見せず、期間ごとの利用ペースだけを見せる。
+const PERIOD_DAYS = 3;
+const PERIOD_COUNT = 10;
+const MAX_ADVANCE_PER_MONTH = 3; // 「前倒しで使う」の月間上限回数
 
 function monthCostJpy(departmentId) {
   const row = db.prepare(`
@@ -31,19 +36,70 @@ function userMonthCostJpy(userId, month) {
   `).get(userId, month).c;
 }
 
+// 当日が月内のどの3日間期間(0-9番目)に属するかを求める。
+// 31日目がある月は最後(10番目)の期間に含める。
+function periodInfo(now = new Date()) {
+  const year = now.getFullYear();
+  const month = now.getMonth(); // 0-indexed
+  const day = now.getDate();
+  const periodIndex = Math.min(PERIOD_COUNT - 1, Math.floor((day - 1) / PERIOD_DAYS));
+  const monthKey = `${year}-${String(month + 1).padStart(2, '0')}`;
+  const periodStartDay = periodIndex * PERIOD_DAYS + 1;
+  const isLastPeriod = periodIndex === PERIOD_COUNT - 1;
+  const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+  const periodEndDay = isLastPeriod ? lastDayOfMonth : periodStartDay + PERIOD_DAYS - 1;
+  const nextPeriodDate = isLastPeriod ? new Date(year, month + 1, 1) : new Date(year, month, periodStartDay + PERIOD_DAYS);
+  return {
+    monthKey,
+    periodIndex,
+    periodKey: `${monthKey}-P${periodIndex}`,
+    periodsElapsed: periodIndex + 1, // 1-10
+    periodStartDay,
+    periodEndDay,
+    nextPeriodLabel: `${nextPeriodDate.getMonth() + 1}/${nextPeriodDate.getDate()}`,
+  };
+}
+
+function periodCostJpy(departmentId, info) {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
+    WHERE department_id = ? AND strftime('%Y-%m', created_at) = ?
+      AND CAST(strftime('%d', created_at) AS INTEGER) BETWEEN ? AND ?
+  `).get(departmentId, info.monthKey, info.periodStartDay, info.periodEndDay);
+  return row.c;
+}
+
 function deptStatus(dept) {
+  const info = periodInfo();
   const used = monthCostJpy(dept.id);
-  const overBudget = used >= dept.monthly_budget_jpy;
-  const unlocked = dept.unlock_month === currentMonth();
+  const periodBudget = dept.monthly_budget_jpy / PERIOD_COUNT;
+  // 前倒し分は当月内でのみ有効(月が変われば0に戻る)
+  const advanceUsed = dept.advance_month === info.monthKey ? dept.advance_used : 0;
+  const releasedPeriods = Math.min(PERIOD_COUNT, info.periodsElapsed + advanceUsed);
+  const releasedBudget = dept.monthly_budget_jpy * releasedPeriods / PERIOD_COUNT;
+  const unlockedByAdmin = dept.unlock_month === info.monthKey;
+  const selfUnlocked = dept.self_unlock_period === info.periodKey;
+  const overReleased = used >= releasedBudget;
+  const locked = overReleased && !unlockedByAdmin && !selfUnlocked;
   return {
     id: dept.id,
     name: dept.name,
     monthly_budget_jpy: dept.monthly_budget_jpy,
     used_jpy: used,
-    ratio: dept.monthly_budget_jpy > 0 ? used / dept.monthly_budget_jpy : 0,
-    locked: overBudget && !unlocked,
-    over_budget: overBudget,
-    unlocked_by_admin: unlocked,
+    ratio: releasedBudget > 0 ? used / releasedBudget : 0,
+    locked,
+    over_budget: overReleased,
+    unlocked_by_admin: unlockedByAdmin,
+    self_unlocked: selfUnlocked,
+    // ペース配分(ユーザー向け表示用): 総額ではなく期間の進み具合を見せる
+    period_number: info.periodsElapsed,
+    period_total: PERIOD_COUNT,
+    period_budget_jpy: periodBudget,
+    period_used_jpy: periodCostJpy(dept.id, info),
+    next_period_label: info.nextPeriodLabel,
+    advance_used: advanceUsed,
+    advance_remaining: Math.max(0, MAX_ADVANCE_PER_MONTH - advanceUsed),
+    advance_available: releasedPeriods < PERIOD_COUNT && advanceUsed < MAX_ADVANCE_PER_MONTH,
   };
 }
 
@@ -306,6 +362,31 @@ async function handle(req, res, method, pathname, url) {
     return json(res, 403, { error: 'アカウントは管理者の承認待ちです。承認されるまでお待ちください。', pending: true });
   }
 
+  // 期間ロック中でも、ユーザー自身の判断で今期だけ利用を続ける「リセット」ボタン
+  if (method === 'POST' && pathname === '/api/budget/reset') {
+    if (!user.department_id) return json(res, 400, { error: '部署が設定されていません。' });
+    const info = periodInfo();
+    db.prepare('UPDATE departments SET self_unlock_period = ? WHERE id = ?').run(info.periodKey, user.department_id);
+    return json(res, 200, { department: getUserDept(user) });
+  }
+
+  // 次の期間の予算枠を先取りする「前倒しで使う」(月3回まで)
+  if (method === 'POST' && pathname === '/api/budget/advance') {
+    if (!user.department_id) return json(res, 400, { error: '部署が設定されていません。' });
+    const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(user.department_id);
+    const info = periodInfo();
+    const used = dept.advance_month === info.monthKey ? dept.advance_used : 0;
+    if (used >= MAX_ADVANCE_PER_MONTH) {
+      return json(res, 400, { error: `前倒しは月${MAX_ADVANCE_PER_MONTH}回までです。` });
+    }
+    if (info.periodsElapsed + used >= PERIOD_COUNT) {
+      return json(res, 400, { error: '今月分の予算枠はすでにすべて利用可能です。' });
+    }
+    db.prepare('UPDATE departments SET advance_used = ?, advance_month = ? WHERE id = ?')
+      .run(used + 1, info.monthKey, user.department_id);
+    return json(res, 200, { department: getUserDept(user) });
+  }
+
   // 会話
   if (method === 'GET' && pathname === '/api/conversations') {
     const rows = db.prepare(
@@ -385,7 +466,8 @@ async function handleChat(req, res, user) {
   if (!dept) return json(res, 400, { error: '部署が設定されていません。管理者に連絡してください。' });
   if (dept.locked) {
     return json(res, 403, {
-      error: `部署「${dept.name}」の今月の予算(${Math.round(dept.monthly_budget_jpy).toLocaleString()}円)を超過したためロックされています。管理者に解除を依頼してください。`,
+      error: `部署「${dept.name}」の今期(${dept.period_number}/${dept.period_total}期)の利用枠を使い切りました。` +
+        `次の期間(${dept.next_period_label}〜)までお待ちいただくか、「前倒しで使う」「リセット」ボタンをご利用ください。`,
       locked: true,
     });
   }

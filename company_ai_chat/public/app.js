@@ -252,8 +252,9 @@ function closeMobileSidebar() {
 function render() {
   const me = state.me;
   const dept = me.department;
-  const usedRatio = dept ? Math.min(1, dept.ratio) : 0;
-  const meterClass = dept && dept.locked ? 'over' : usedRatio >= 0.8 ? 'warn' : '';
+  // 総額(月予算)は見せず、今期(3日間)の利用ペースだけを見せる
+  const periodRatio = dept && dept.period_budget_jpy > 0 ? Math.min(1, dept.period_used_jpy / dept.period_budget_jpy) : 0;
+  const meterClass = dept && dept.locked ? 'over' : periodRatio >= 0.8 ? 'warn' : '';
 
   $app.innerHTML = `
     <div class="layout">
@@ -271,10 +272,11 @@ function render() {
           ${dept ? `
           <div class="budget-meter">
             <div class="meter-label">
-              <span>部署予算(今月)</span>
-              <span>${yen(dept.used_jpy)} / ${yen(dept.monthly_budget_jpy)}</span>
+              <span>利用ペース(${dept.period_number}/${dept.period_total}期)</span>
+              <span>${dept.locked ? '🔒 制限中' : '利用中'}</span>
             </div>
-            <div class="meter-track"><div class="meter-fill ${meterClass}" style="width:${(usedRatio * 100).toFixed(1)}%"></div></div>
+            <div class="meter-track"><div class="meter-fill ${meterClass}" style="width:${(periodRatio * 100).toFixed(1)}%"></div></div>
+            <div class="meter-note">次の期間: ${dept.next_period_label}〜</div>
           </div>` : ''}
           ${me.my_private_stats && me.my_private_stats.judged > 0 ? `
           <div class="my-ratio">
@@ -376,7 +378,7 @@ function renderChat() {
     </div>`).join('');
 
   const budgetBanner = me.budget_alert
-    ? `<div class="banner"><div class="msg">📊 部署予算の消化率が80%を超えました。計画的にご利用ください。</div></div>`
+    ? `<div class="banner"><div class="msg">📊 今期の利用ペースが早めです。計画的にご利用ください。</div></div>`
     : '';
 
   document.getElementById('main').innerHTML = `
@@ -389,10 +391,15 @@ function renderChat() {
     ${locked ? `
     <div class="messages">
       <div class="lock-overlay">
-        <div class="icon">🔒</div>
-        <h2>予算上限に達しました</h2>
-        <p>部署「${esc(dept.name)}」の今月の利用額が予算(${yen(dept.monthly_budget_jpy)})を超えたため、チャットがロックされています。<br>
-        続けて利用が必要な場合は管理者にロック解除を依頼してください。</p>
+        <div class="icon">⏳</div>
+        <h2>今期の利用枠を使い切りました</h2>
+        <p>部署「${esc(dept.name)}」の今期(${dept.period_number}/${dept.period_total}期)の利用枠を使い切りました。<br>
+        次の期間(${dept.next_period_label}〜)までお待ちいただくか、下のボタンをご利用ください。<br>
+        予算そのものを増やしたい場合は管理者にご相談ください。</p>
+        <div class="lock-actions">
+          ${dept.advance_available ? `<button class="btn-primary" id="btn-advance">前倒しで使う(残り${dept.advance_remaining}回/月)</button>` : ''}
+          <button class="btn-ghost" id="btn-self-reset">リセット</button>
+        </div>
       </div>
     </div>` : `
     <div class="messages" id="messages"><div class="thread" id="thread"></div></div>
@@ -419,7 +426,24 @@ function renderChat() {
   });
   document.getElementById('mobile-menu-btn').onclick = openMobileSidebar;
 
-  if (locked) return;
+  if (locked) {
+    const advanceBtn = document.getElementById('btn-advance');
+    if (advanceBtn) advanceBtn.onclick = async () => {
+      try {
+        await api('/api/budget/advance', { method: 'POST' });
+      } catch (err) {
+        alert(err.message);
+      }
+      await loadMe();
+      render();
+    };
+    document.getElementById('btn-self-reset').onclick = async () => {
+      await api('/api/budget/reset', { method: 'POST' });
+      await loadMe();
+      render();
+    };
+    return;
+  }
 
   renderMessages();
 
@@ -964,7 +988,7 @@ function budgetChart(departments) {
     const usedW = Math.min((dp.used_jpy / max) * plotW, plotW);
     const over = dp.used_jpy >= dp.monthly_budget_jpy;
     const fill = over ? '#d03b3b' : '#2a78d6';
-    const pct = dp.monthly_budget_jpy > 0 ? Math.round(dp.ratio * 100) : 0;
+    const pct = dp.monthly_budget_jpy > 0 ? Math.round((dp.used_jpy / dp.monthly_budget_jpy) * 100) : 0;
     svg += `
       <text x="0" y="${y + 15}" font-size="13" fill="#0b0b0b">${esc(dp.name)}</text>
       <rect x="${labelW}" y="${y}" width="${budgetW}" height="22" rx="4" fill="#e1e0d9"
@@ -1061,16 +1085,19 @@ function renderDepts(el, d) {
   el.innerHTML = `
     <div class="panel">
       <h3>部署と予算</h3>
-      <p class="desc">予算(円/月)を編集できます。超過するとその部署のチャットは自動でロックされ、「ロック解除」で今月分のみ解除できます。</p>
+      <p class="desc">予算(円/月)は、1ヶ月30日を3日ごと10期間に分けて少しずつ解放するペース配分方式で使われます。利用者には総額を見せず、期間の進み具合だけを表示しています。</p>
+      <p class="desc">各期間の枠を使い切るとチャットはロックされ、利用者自身が「リセット」(今期だけ続行)や「前倒し」(月3回まで)で対応できます。「ロック解除」を押すと今月分は無条件で解除されます。</p>
       <p class="desc">部署の利用額は、その部署に所属する全ユーザーの利用額の合計です(ユーザータブで内訳を確認できます)。</p>
       <table class="data">
-        <tr><th>部署名</th><th class="num">今月の利用額</th><th class="num">予算(円/月)</th><th>状態</th><th></th></tr>
+        <tr><th>部署名</th><th class="num">今月の利用額</th><th class="num">予算(円/月)</th><th>今期</th><th>状態</th><th></th></tr>
         ${d.departments.map((dp) => `<tr>
           <td><input class="inline-input" style="width:140px;text-align:left" data-name="${dp.id}" value="${esc(dp.name)}"></td>
-          <td class="num">${yen(dp.used_jpy)}(${Math.round(dp.ratio * 100)}%)</td>
+          <td class="num">${yen(dp.used_jpy)}(月間${Math.round((dp.used_jpy / (dp.monthly_budget_jpy || 1)) * 100)}%)</td>
           <td class="num"><input class="inline-input" data-budget="${dp.id}" value="${Math.round(dp.monthly_budget_jpy)}"></td>
+          <td>${dp.period_number}/${dp.period_total}期(前倒し${dp.advance_used}/3)</td>
           <td>${dp.locked ? '<span class="pill locked">🔒 ロック中</span>'
             : dp.unlocked_by_admin && dp.over_budget ? '<span class="pill unlocked">解除中(今月)</span>'
+            : dp.self_unlocked ? '<span class="pill unlocked">本人リセット中</span>'
             : '<span class="pill ok">利用可</span>'}</td>
           <td>
             <button class="btn-ghost" data-save="${dp.id}">保存</button>

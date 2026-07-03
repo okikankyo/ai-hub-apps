@@ -119,6 +119,14 @@ db.exec(`
   // 応答に使ったモデルの記録(ルーティング結果の表示用)
   const msgCols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
   if (!msgCols.includes('model')) db.exec('ALTER TABLE messages ADD COLUMN model TEXT');
+
+  // 予算のペース配分(3日ごとの期間制)関連
+  const deptCols = db.prepare('PRAGMA table_info(departments)').all().map((c) => c.name);
+  // 「前倒しで使う」を押した回数(月ごとにリセット、advance_month で対象月を判定)
+  if (!deptCols.includes('advance_used')) db.exec('ALTER TABLE departments ADD COLUMN advance_used INTEGER NOT NULL DEFAULT 0');
+  if (!deptCols.includes('advance_month')) db.exec('ALTER TABLE departments ADD COLUMN advance_month TEXT');
+  // ユーザー自身が押せる「リセット」。対象期間(YYYY-MM-P{0-9})中だけロックを解除する
+  if (!deptCols.includes('self_unlock_period')) db.exec('ALTER TABLE departments ADD COLUMN self_unlock_period TEXT');
 }
 
 function hashPassword(password) {
