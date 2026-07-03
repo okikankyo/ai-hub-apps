@@ -1,10 +1,13 @@
 # node:sqlite を使うため Node 22.5+ が必須。
+# 依存パッケージ(nodemailer、依存ゼロ)はビルド時のnpm installを避けるため
+# node_modules ごとリポジトリに含めている(社内ネットワークのSSL検査機器等で
+# ビルドサーバーからのnpmレジストリ接続が失敗する環境でも問題なくビルドできるように)。
 FROM node:22-alpine
 
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --omit=dev
+COPY node_modules ./node_modules
 COPY server.js ./
 COPY lib ./lib
 COPY public ./public
