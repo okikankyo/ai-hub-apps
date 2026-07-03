@@ -84,8 +84,7 @@ OPENAI_API_KEY=sk-xxxx node server.js
 | 変数 | 既定値 | 説明 |
 |---|---|---|
 | `OPENAI_API_KEY` | (なし=モック) | OpenAI API キー |
-| `CHAT_MODEL` | `gpt-4o-mini` | チャットに使うモデル |
-| `CLASSIFIER_MODEL` | `gpt-4o-mini` | 業務/私的判定に使うモデル |
+| `CLASSIFIER_MODEL` | `gpt-4o-mini` | 業務/私的判定・モデルルーティング判定に使うモデル |
 | `USD_JPY` | `150` | コスト換算レート(円/ドル) |
 | `PRIVATE_RATIO_WARN` | `0.3` | 自動警告を出す私的利用率の閾値 |
 | `PRIVATE_MIN_COUNT` | `5` | 自動警告に必要な月間の最低判定件数 |

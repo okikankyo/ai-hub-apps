@@ -284,6 +284,15 @@ async function handle(req, res, method, pathname, url) {
       return json(res, 200, rows);
     }
     if (method === 'DELETE' && !convMatch[2]) {
+      // 会話内の生成画像ファイルも一緒に削除する(孤児ファイル防止)
+      const imageRows = db.prepare(
+        "SELECT content FROM messages WHERE conversation_id = ? AND content LIKE '%/api/files/%'"
+      ).all(convId);
+      for (const row of imageRows) {
+        for (const m of row.content.matchAll(/\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg))/g)) {
+          try { fs.unlinkSync(path.join(openai.IMAGES_DIR, m[1])); } catch { /* 既に無ければ無視 */ }
+        }
+      }
       db.prepare('DELETE FROM conversations WHERE id = ?').run(convId);
       return json(res, 200, { ok: true });
     }
@@ -300,7 +309,7 @@ async function handle(req, res, method, pathname, url) {
     const filePath = path.join(openai.IMAGES_DIR, fileMatch[1]);
     let data;
     try {
-      data = fs.readFileSync(filePath);
+      data = await fs.promises.readFile(filePath);
     } catch {
       return json(res, 404, { error: 'not found' });
     }
@@ -356,8 +365,13 @@ async function handleChat(req, res, user) {
   }
 
   // 送信・削除・金額・個人情報が絡むものは実行前に人間確認を求める
+  // (ルーター障害で判定できなかった場合もフェイルクローズでここに来る)
   if (route.category === 'sensitive' && confirmed !== true) {
-    return json(res, 200, { needs_confirmation: true, category: 'sensitive' });
+    return json(res, 200, {
+      needs_confirmation: true,
+      category: 'sensitive',
+      router_error: route.routerFailed === true,
+    });
   }
 
   // ユーザー発言を保存し、初回ならタイトルに反映

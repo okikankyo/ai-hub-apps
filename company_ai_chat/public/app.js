@@ -12,7 +12,8 @@ const state = {
   view: 'chat',      // 'chat' | 'admin'
   adminTab: 'dashboard',
   adminData: null,
-  modelPref: 'auto', // 'auto' | 'light' | 'heavy'
+  modelPref: 'auto',     // 'auto' | 'light' | 'heavy'
+  pendingConfirm: null,  // { text, msg, routerError } 実行前確認の待機状態
 };
 
 // ---------- ユーティリティ ----------
@@ -192,6 +193,7 @@ function render() {
   document.getElementById('new-chat').onclick = async () => {
     state.currentConvId = null;
     state.messages = [];
+    state.pendingConfirm = null;
     state.view = 'chat';
     render();
   };
@@ -222,6 +224,7 @@ function renderConvList() {
       if (e.target.dataset.del) return;
       state.currentConvId = Number(item.dataset.id);
       state.view = 'chat';
+      state.pendingConfirm = null;
       state.messages = await api(`/api/conversations/${state.currentConvId}/messages`);
       render();
     };
@@ -234,6 +237,7 @@ function renderConvList() {
       if (state.currentConvId === Number(btn.dataset.del)) {
         state.currentConvId = null;
         state.messages = [];
+        state.pendingConfirm = null;
       }
       await loadConversations();
       render();
@@ -338,6 +342,8 @@ function renderMessages() {
           m.model ? `<div class="msg-model">${esc(m.model)}</div>` : ''
         }</div></div></div>`
   ).join('');
+  // 実行前確認カードは state から復元する(再描画で消えないように)
+  if (state.pendingConfirm) thread.appendChild(buildConfirmCard());
   scrollToBottom();
 }
 
@@ -371,9 +377,17 @@ async function sendMessage() {
   const text = input.value.trim();
   if (!text) return;
 
-  if (!state.currentConvId) {
-    const { id } = await api('/api/conversations', { method: 'POST' });
-    state.currentConvId = id;
+  // 会話作成の await 中も二重送信を防ぐため、ここで即座にロックする
+  state.streaming = true;
+  try {
+    if (!state.currentConvId) {
+      const { id } = await api('/api/conversations', { method: 'POST' });
+      state.currentConvId = id;
+    }
+  } catch (err) {
+    state.streaming = false;
+    alert('会話の作成に失敗しました: ' + err.message);
+    return;
   }
 
   input.value = '';
@@ -408,7 +422,8 @@ async function executeChat(text, confirmed) {
       stream.remove();
       if (data.needs_confirmation) {
         refreshAfter = false;
-        showConfirmCard(text);
+        state.pendingConfirm = { text, routerError: data.router_error === true };
+        renderMessages();
         return;
       }
       state.messages.push({ role: 'assistant', content: `⚠️ ${data.error || '送信に失敗しました'}` });
@@ -467,30 +482,34 @@ async function executeChat(text, confirmed) {
   }
 }
 
-// sensitive 判定時の実行前確認カード
-function showConfirmCard(text) {
-  const thread = document.getElementById('thread');
+// sensitive 判定時の実行前確認カード。
+// state.pendingConfirm に状態を持たせ、renderMessages() の再描画をまたいでも消えないようにする。
+function buildConfirmCard() {
+  const { text, routerError } = state.pendingConfirm;
   const card = document.createElement('div');
   card.className = 'confirm-card';
   card.innerHTML = `
     <div class="confirm-title">⚠️ 実行前の確認</div>
-    <p>この依頼は<strong>送信・削除・金額・個人情報</strong>のいずれかに関わる可能性があると判定されました。<br>
+    <p>${routerError
+      ? '内容の自動判定に失敗したため、安全のため確認を求めています。'
+      : 'この依頼は<strong>送信・削除・金額・個人情報</strong>のいずれかに関わる可能性があると判定されました。'}<br>
     高性能モデルで慎重に処理しますが、内容を確認のうえ続行してください。</p>
     <div class="confirm-actions">
       <button class="btn-primary" data-proceed>確認して続行</button>
       <button class="btn-ghost" data-cancel>キャンセル</button>
     </div>`;
-  thread.appendChild(card);
-  scrollToBottom();
   card.querySelector('[data-proceed]').onclick = () => {
-    card.remove();
+    state.pendingConfirm = null;
     executeChat(text, true);
   };
   card.querySelector('[data-cancel]').onclick = () => {
-    card.remove();
-    state.messages.pop(); // 未送信のユーザー発言を取り消す
+    state.pendingConfirm = null;
+    // 末尾がこの確認に対応する未送信発言であれば取り消す(別発言の混入を避ける)
+    const last = state.messages[state.messages.length - 1];
+    if (last && last.role === 'user' && last.content === text) state.messages.pop();
     renderMessages();
   };
+  return card;
 }
 
 // ---------- 管理画面 ----------

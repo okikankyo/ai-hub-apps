@@ -9,7 +9,6 @@ const { DATA_DIR } = require('./db');
 
 const API_KEY = process.env.OPENAI_API_KEY || '';
 const API_BASE = process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
-const CHAT_MODEL = process.env.CHAT_MODEL || 'gpt-4o-mini';
 const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL || 'gpt-4o-mini';
 const USD_JPY = Number(process.env.USD_JPY || 150);
 const MOCK = !API_KEY;
@@ -49,7 +48,7 @@ const SYSTEM_PROMPT =
 
 // チャット補完をストリーミングで実行する。
 // onDelta(text) がトークンごとに呼ばれ、完了時に { content, promptTokens, completionTokens, model } を返す。
-async function streamChat(history, onDelta, model = CHAT_MODEL) {
+async function streamChat(history, onDelta, model = LIGHT_MODEL) {
   if (MOCK) return mockStream(history, onDelta, model);
 
   const res = await fetch(`${API_BASE}/chat/completions`, {
@@ -123,6 +122,13 @@ function modelFor(category) {
   return LIGHT_MODEL;
 }
 
+// gpt-5系・o系は temperature 指定と max_tokens を受け付けない(既定値+max_completion_tokens を使う)
+function classifierParams(maxTokens) {
+  const params = { max_completion_tokens: maxTokens };
+  if (!/^(gpt-5|o\d)/.test(CLASSIFIER_MODEL)) params.temperature = 0;
+  return params;
+}
+
 async function routeMessage(text) {
   if (MOCK) return mockRoute(text);
   try {
@@ -131,8 +137,7 @@ async function routeMessage(text) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
       body: JSON.stringify({
         model: CLASSIFIER_MODEL,
-        temperature: 0,
-        max_tokens: 5,
+        ...classifierParams(16),
         messages: [
           { role: 'system', content: ROUTER_PROMPT },
           { role: 'user', content: text.slice(0, 2000) },
@@ -151,8 +156,9 @@ async function routeMessage(text) {
     };
   } catch (err) {
     console.error('[router]', err.message);
-    // ルーター障害時は安全側(軽量モデル)に倒す
-    return { category: 'light', model: LIGHT_MODEL, promptTokens: 0, completionTokens: 0 };
+    // フェイルクローズ: 判定できない間は sensitive 扱いにして本人確認を挟み、
+    // 確認ゲートが黙って無効化されるのを防ぐ(確認後は高性能モデルで処理される)
+    return { category: 'sensitive', model: HEAVY_MODEL, routerFailed: true, promptTokens: 0, completionTokens: 0 };
   }
 }
 
@@ -170,10 +176,20 @@ async function generateImage(prompt) {
     throw new Error(`image API error ${res.status}: ${body.slice(0, 300)}`);
   }
   const json = await res.json();
-  const b64 = json.data?.[0]?.b64_json;
-  if (!b64) throw new Error('no image in response');
+  // gpt-image-1 は b64_json、dall-e-3 など URL 応答のモデルにも対応する
+  const item = json.data?.[0] || {};
+  let buf;
+  if (item.b64_json) {
+    buf = Buffer.from(item.b64_json, 'base64');
+  } else if (item.url) {
+    const imgRes = await fetch(item.url);
+    if (!imgRes.ok) throw new Error(`image download failed ${imgRes.status}`);
+    buf = Buffer.from(await imgRes.arrayBuffer());
+  } else {
+    throw new Error('no image in response');
+  }
   const file = `${crypto.randomBytes(12).toString('hex')}.png`;
-  fs.writeFileSync(path.join(IMAGES_DIR, file), Buffer.from(b64, 'base64'));
+  fs.writeFileSync(path.join(IMAGES_DIR, file), buf);
   return { file, model: IMAGE_MODEL, costJpy: IMAGE_COST_JPY };
 }
 
@@ -189,8 +205,7 @@ async function classify(text) {
       },
       body: JSON.stringify({
         model: CLASSIFIER_MODEL,
-        temperature: 0,
-        max_tokens: 3,
+        ...classifierParams(8),
         messages: [
           {
             role: 'system',
@@ -225,7 +240,7 @@ function estimateTokens(history) {
 
 // ---- モックモード(APIキーなしでの動作確認用) ----
 
-async function mockStream(history, onDelta, model = CHAT_MODEL) {
+async function mockStream(history, onDelta, model = LIGHT_MODEL) {
   const last = history[history.length - 1]?.content || '';
   const reply =
     `(モック応答 / ${model})「${last.slice(0, 40)}」を受け取りました。` +
@@ -274,5 +289,5 @@ function mockClassify(text) {
 
 module.exports = {
   streamChat, classify, costJpy, estimateTokens, routeMessage, generateImage,
-  CHAT_MODEL, CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
+  CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
 };
