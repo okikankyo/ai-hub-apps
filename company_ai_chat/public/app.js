@@ -17,6 +17,7 @@ const state = {
   templates: [],         // チャット開始画面のテンプレート一覧
   templatesExpanded: false,
   templateEditMode: false, // 管理者のみ: チャット画面内でのテンプレート編集モード
+  templateSnapshot: null,  // 編集モードに入った時点のテンプレート一覧(「リセット」で戻す先)
 };
 
 const TEMPLATE_VISIBLE_COUNT = 3; // これを超える分はドリルダウンで畳む
@@ -516,6 +517,10 @@ function attachTemplateButtonHandlers(root) {
   if (editToggle) {
     editToggle.onclick = () => {
       state.templateEditMode = !state.templateEditMode;
+      // 編集モードに入った瞬間の状態を「リセット」の戻し先として保存しておく
+      state.templateSnapshot = state.templateEditMode
+        ? state.templates.map((t) => ({ ...t }))
+        : null;
       renderMessages();
     };
   }
@@ -537,8 +542,24 @@ function attachTemplateButtonHandlers(root) {
       } catch (err) { alert(err.message); }
     };
   });
+  // リセット: このテンプレートを「編集モードに入った時点の内容」に戻す
+  // (保存を間違えて上書きしてしまった場合の取り消しに使う)
   root.querySelectorAll('[data-reset-tpl]').forEach((btn) => {
-    btn.onclick = () => renderMessages(); // 保存前の未確定入力を破棄して再描画
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.resetTpl);
+      const original = (state.templateSnapshot || []).find((t) => t.id === id);
+      try {
+        if (original) {
+          await api(`/api/admin/templates/${id}`, {
+            method: 'PATCH', body: { label: original.label, prompt: original.prompt },
+          });
+        } else {
+          // 編集モード中に新規追加したテンプレートは、リセットで削除して無かった状態に戻す
+          await api(`/api/admin/templates/${id}`, { method: 'DELETE' });
+        }
+        await refreshTemplates();
+      } catch (err) { alert(err.message); }
+    };
   });
   root.querySelectorAll('[data-dup-tpl]').forEach((btn) => {
     btn.onclick = async () => {
