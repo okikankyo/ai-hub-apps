@@ -1,0 +1,12 @@
+{
+  "name": "company-ai-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenAI APIを使った自社向けチャットWebアプリ(部署予算管理・モデルルーティング・Googleログイン対応)",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

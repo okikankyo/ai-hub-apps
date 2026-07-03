@@ -77,6 +77,24 @@ OPENAI_API_KEY=sk-xxxx node server.js
 
 既存ユーザーと同じメールアドレスの Google アカウントでログインした場合は、そのアカウントに自動的に紐付きます(再承認は不要)。
 
+## Coolify へのデプロイ
+
+このリポジトリには `Dockerfile` が含まれているので、Coolify では「Dockerfile」タイプのリソースとしてデプロイできます。
+
+1. Coolify で **新規リソース → Dockerfile** を選び、このリポジトリ(またはこのブランチ)と `company_ai_chat` をベースディレクトリに指定
+2. **ポート**: `8787` を公開ポートとして設定(Dockerfile 内で `EXPOSE 8787` 済み)。Coolify 側で自動的に Traefik 経由の HTTPS が割り当てられる
+3. **永続ボリューム**: コンテナ内の `/app/data` に永続ボリュームをマウントする(必須)。
+   ここに SQLite データベースと生成画像が保存されるため、マウントしないと**再デプロイのたびに全データが消えます**
+4. **環境変数**を Coolify の「Environment Variables」画面で設定(`.env.example` を参照):
+   - `OPENAI_API_KEY`(必須。未設定だとモックモードのまま公開されてしまうので注意)
+   - `BASE_URL` に Coolify が割り当てた公開ドメイン(例: `https://chat.example.com`)を設定
+     - `https://` で始めておくと、セッション Cookie に自動で `Secure` 属性が付く
+     - Google ログインを使う場合、このドメイン+`/auth/google/callback` を Google Cloud Console の承認済みリダイレクト URI に登録すること
+   - 部署予算・モデル・Google OAuth 関連の変数は必要に応じて設定
+5. デプロイ後、初回は `admin` / `admin1234` でログインし、**必ずパスワードを変更**してください
+
+ヘルスチェックは認証不要の `/api/config` を利用しています(Dockerfile の `HEALTHCHECK` に設定済み)。
+
 ## 環境変数
 
 `.env.example` を参照してください。主なもの:
@@ -99,13 +117,15 @@ OPENAI_API_KEY=sk-xxxx node server.js
 - **コスト計算**: OpenAI のレスポンスに含まれるトークン数 × モデル単価(`lib/openai.js` の `PRICING`)を円換算して `usage_log` に記録します。分類 API のコストも含まれます。
 - **ロック判定**: 「当月の部署合計コスト ≥ 予算」でロック。管理者の解除は当月限りで、翌月は自動的に通常判定に戻ります。
 - **プライバシー**: 分類結果テーブル(`classifications`)にはラベルと日時のみ保存し、メッセージ本文・会話への参照を持ちません。会話本文は本人のチャット履歴表示のためだけに保存され、管理画面からは参照できません。
-- **認証**: scrypt によるパスワードハッシュ + HttpOnly Cookie セッション。社内 LAN での利用を想定しています。インターネット公開する場合はリバースプロキシで HTTPS 化し、Cookie に `Secure` を付けてください(`lib/auth.js`)。
+- **認証**: scrypt によるパスワードハッシュ + HttpOnly Cookie セッション。`BASE_URL` が `https://` の場合、セッション/OAuth Cookie に自動で `Secure` が付与されます(`lib/auth.js`)。
 
 ## ディレクトリ構成
 
 ```
 company_ai_chat/
 ├── server.js          # エントリポイント(HTTP サーバー + 静的配信)
+├── Dockerfile          # Coolify 等へのデプロイ用
+├── package.json        # メタデータ(依存パッケージなし)
 ├── lib/
 │   ├── db.js          # SQLite (node:sqlite) スキーマ・シード
 │   ├── auth.js        # セッション認証
@@ -113,5 +133,5 @@ company_ai_chat/
 │   ├── openai.js      # OpenAI API 呼び出し・コスト計算・モック
 │   └── routes.js      # API ルート(チャット SSE / 予算 / 管理)
 ├── public/            # フロントエンド(vanilla JS SPA)
-└── data/              # SQLite DB(自動生成、Git 管理外)
+└── data/              # SQLite DB・生成画像(自動生成、Git 管理外。本番は永続ボリューム推奨)
 ```

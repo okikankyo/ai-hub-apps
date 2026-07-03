@@ -151,13 +151,11 @@ function handleGoogleStart(req, res) {
     return redirect(res, '/?login_error=' + encodeURIComponent('Googleログインが未設定です(GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET)'));
   }
   const state = crypto.randomBytes(16).toString('hex');
-  return redirect(res, google.authUrl(state),
-    `oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600`);
+  return redirect(res, google.authUrl(state), auth.oauthStateCookie(state));
 }
 
 async function handleGoogleCallback(req, res, url) {
-  const fail = (msg) => redirect(res, '/?login_error=' + encodeURIComponent(msg),
-    'oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
+  const fail = (msg) => redirect(res, '/?login_error=' + encodeURIComponent(msg), auth.clearOauthStateCookie());
   try {
     const state = url.searchParams.get('state');
     const code = url.searchParams.get('code');
@@ -183,10 +181,7 @@ async function handleGoogleCallback(req, res, url) {
     if (user.disabled) return fail('このアカウントは停止されています。管理者にお問い合わせください。');
 
     const token = auth.createSession(user.id);
-    res.setHeader('Set-Cookie', [
-      auth.sessionCookie(token),
-      'oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0',
-    ]);
+    res.setHeader('Set-Cookie', [auth.sessionCookie(token), auth.clearOauthStateCookie()]);
     return redirect(res, '/');
   } catch (err) {
     console.error('[google auth]', err.message);

@@ -6,6 +6,11 @@ const { db, verifyPassword } = require('./db');
 
 const SESSION_TTL_HOURS = 24 * 7;
 
+// リバースプロキシ(Coolify/Traefik等)配下で BASE_URL が https:// なら
+// Cookie に Secure を付与する。プロキシ~コンテナ間は平文でも、
+// ブラウザ~公開エンドポイント間が HTTPS であれば安全に付与できる。
+const SECURE = (process.env.BASE_URL || '').startsWith('https://') ? '; Secure' : '';
+
 function parseCookies(req) {
   const header = req.headers.cookie || '';
   const out = {};
@@ -53,12 +58,22 @@ function getUser(req) {
 }
 
 function sessionCookie(token) {
-  // 社内 LAN 想定。HTTPS 配下で運用する場合は Secure を付けること。
-  return `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_HOURS * 3600}`;
+  return `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_HOURS * 3600}${SECURE}`;
 }
 
 function clearCookie() {
-  return 'session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0';
+  return `session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${SECURE}`;
 }
 
-module.exports = { login, logout, getUser, sessionCookie, clearCookie, parseCookies, createSession };
+function oauthStateCookie(state) {
+  return `oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=600${SECURE}`;
+}
+
+function clearOauthStateCookie() {
+  return `oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${SECURE}`;
+}
+
+module.exports = {
+  login, logout, getUser, sessionCookie, clearCookie, parseCookies, createSession,
+  oauthStateCookie, clearOauthStateCookie,
+};
