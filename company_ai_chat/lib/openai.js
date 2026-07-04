@@ -193,12 +193,25 @@ async function routeMessage(text) {
 
 // ---- 画像生成 ----
 
+// 会話中で決まった縦横比(正方形/横長/縦長)をAPIのsizeパラメータに反映する。
+// 未指定なら正方形のまま。
+function pickImageSize(prompt) {
+  const isDalle3 = /dall-e-3/i.test(IMAGE_MODEL);
+  if (/横長|横向き|ランドスケープ|landscape|名刺.*横|横.*名刺/i.test(prompt)) {
+    return isDalle3 ? '1792x1024' : '1536x1024';
+  }
+  if (/縦長|縦向き|ポートレート|portrait|名刺.*縦|縦.*名刺/i.test(prompt)) {
+    return isDalle3 ? '1024x1792' : '1024x1536';
+  }
+  return '1024x1024';
+}
+
 async function generateImage(prompt) {
   if (MOCK) return mockImage(prompt);
   const res = await fetch(`${API_BASE}/images/generations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-    body: JSON.stringify({ model: IMAGE_MODEL, prompt: prompt.slice(0, 4000), size: '1024x1024' }),
+    body: JSON.stringify({ model: IMAGE_MODEL, prompt: prompt.slice(0, 4000), size: pickImageSize(prompt) }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
