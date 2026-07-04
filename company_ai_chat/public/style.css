@@ -220,16 +220,12 @@ input, select, textarea { font: inherit; }
 .msg-model { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .gen-image { max-width: 320px; width: 100%; border-radius: 12px; border: 1px solid var(--grid); display: block; }
 
-.confirm-card {
-  background: var(--warning-bg); border: 1px solid var(--warning-border); border-radius: 12px;
-  padding: 16px 18px; margin: 4px 0 20px; font-size: 13.5px; color: #6b5400;
-}
-.confirm-card .confirm-title { font-weight: 700; margin-bottom: 6px; }
-.confirm-card p { margin: 0 0 12px; line-height: 1.7; }
-.confirm-actions { display: flex; gap: 10px; }
-
 .empty-state { text-align: center; color: var(--muted); margin-top: 18vh; }
 .empty-state h2 { color: var(--ink); font-size: 24px; margin-bottom: 8px; }
+.empty-state-notice {
+  max-width: 480px; margin: 10px auto 0; font-size: 12px; color: #8a6d00;
+  background: var(--warning-bg); border: 1px solid var(--warning-border); border-radius: 10px; padding: 8px 14px;
+}
 .template-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; max-width: 640px; margin-left: auto; margin-right: auto; }
 .template-btn {
   background: var(--surface); border: 1px solid var(--grid); border-radius: 20px;

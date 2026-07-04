@@ -12,8 +12,7 @@ const state = {
   view: 'chat',      // 'chat' | 'admin'
   adminTab: 'dashboard',
   adminData: null,
-  modelPref: 'auto',     // 'auto' | 'light' | 'heavy'
-  pendingConfirm: null,  // { text, msg, routerError } 実行前確認の待機状態
+  modelPref: 'light',    // 'light' | 'heavy' | 'image'(自動判定は行わずユーザーが選択)
   templates: [],         // チャット開始画面のテンプレート一覧(ユーザー個人用)
   templatesExpanded: false,
   templateEditMode: false, // チャット画面内でのテンプレート編集モード
@@ -332,7 +331,6 @@ function render() {
   document.getElementById('new-chat').onclick = async () => {
     state.currentConvId = null;
     state.messages = [];
-    state.pendingConfirm = null;
     state.pendingProjectId = null;
     state.view = 'chat';
     closeMobileSidebar();
@@ -493,7 +491,6 @@ function renderConvList() {
 async function openConversation(id) {
   state.currentConvId = id;
   state.view = 'chat';
-  state.pendingConfirm = null;
   closeMobileSidebar();
   state.messages = await api(`/api/conversations/${id}/messages`);
   render();
@@ -560,7 +557,6 @@ function openConvMenu(id, x, y) {
       if (state.currentConvId === id) {
         state.currentConvId = null;
         state.messages = [];
-        state.pendingConfirm = null;
       }
       await loadConversations();
       render();
@@ -579,7 +575,6 @@ function openProjectMenu(id, x, y) {
         state.pendingProjectId = id;
         state.currentConvId = null;
         state.messages = [];
-        state.pendingConfirm = null;
         state.view = 'chat';
         closeMobileSidebar();
         render();
@@ -656,16 +651,16 @@ function renderChat() {
       <div class="composer">
         <button class="attach-btn" id="attach-btn" title="ファイルを添付">📎</button>
         <select id="model-pref" class="model-pref" title="使用モデル">
-          <option value="auto">🪄 自動</option>
           <option value="light">⚡ 軽量</option>
           <option value="heavy">🧠 高性能</option>
+          <option value="image">🎨 画像生成</option>
         </select>
         <textarea id="input" rows="1" placeholder="メッセージを入力…(Shift+Enterで送信)"></textarea>
         <button class="send" id="send" title="送信">↑</button>
       </div>
       <input type="file" id="file-input" multiple style="display:none"
         accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.tsv,.json,.log">
-      <div class="composer-note">Shift+Enterで送信、クリックでも送信できます(Enterのみでは改行されます)。「自動」では内容に応じて最適なモデルに振り分けます。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
+      <div class="composer-note">Shift+Enterで送信、クリックでも送信できます(Enterのみでは改行されます)。通常は「軽量」のままでOKです。精密な画像の確認や複雑な内容は「高性能」を、画像を作りたいときは「画像生成」を選んでください。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
     </div>`}
   `;
 
@@ -784,6 +779,7 @@ function renderMessages() {
       <div class="empty-state">
         <h2>お手伝いできることはありますか?</h2>
         <p>業務に関する質問・文章作成・翻訳・コード作成などに使えます。</p>
+        <p class="empty-state-notice">⚠️ 送信・削除・金額・個人情報に関わる操作の自動確認は行われません。実行前の内容は必ずご自身でご確認ください。</p>
         ${renderTemplateButtons()}
       </div>`;
     attachTemplateButtonHandlers(thread);
@@ -796,8 +792,6 @@ function renderMessages() {
           m.model ? `<div class="msg-model">${esc(m.model)}</div>` : ''
         }</div></div></div>`
   ).join('');
-  // 実行前確認カードは state から復元する(再描画で消えないように)
-  if (state.pendingConfirm) thread.appendChild(buildConfirmCard());
   scrollToBottom();
 }
 
@@ -1001,15 +995,14 @@ async function sendMessage() {
   renderAttachRow();
   state.messages.push({ role: 'user', content: text });
   renderMessages();
-  await executeChat(text, false);
+  await executeChat(text);
 }
 
-async function executeChat(text, confirmed) {
+async function executeChat(text) {
   state.streaming = true;
   state.abortController = new AbortController();
   setSendButtonMode('stop');
   const stream = appendStreamingRow();
-  let refreshAfter = true; // 確認ダイアログ表示時は画面を作り直さない
   let acc = ''; // catch節でも参照するため try の外で宣言する
 
   try {
@@ -1019,22 +1012,15 @@ async function executeChat(text, confirmed) {
       body: JSON.stringify({
         conversation_id: state.currentConvId,
         message: text,
-        confirmed,
         model_pref: state.modelPref,
       }),
       signal: state.abortController.signal,
     });
 
-    // JSON 応答 = ストリーミング以外(エラー or 人間確認の要求)
+    // JSON 応答 = ストリーミング以外(エラー)
     if ((res.headers.get('content-type') || '').includes('application/json')) {
       const data = await res.json().catch(() => ({}));
       stream.remove();
-      if (data.needs_confirmation) {
-        refreshAfter = false;
-        state.pendingConfirm = { text, routerError: data.router_error === true };
-        renderMessages();
-        return;
-      }
       state.messages.push({ role: 'assistant', content: `⚠️ ${data.error || '送信に失敗しました'}` });
       renderMessages();
       return;
@@ -1086,12 +1072,10 @@ async function executeChat(text, confirmed) {
     state.streaming = false;
     state.abortController = null;
     setSendButtonMode('send');
-    if (refreshAfter) {
-      // 予算メーター・タイトル・警告を最新化(画面全体を再描画)
-      await loadMe();
-      await loadConversations();
-      render();
-    }
+    // 予算メーター・タイトル・警告を最新化(画面全体を再描画)
+    await loadMe();
+    await loadConversations();
+    render();
   }
 }
 
@@ -1111,36 +1095,6 @@ function setSendButtonMode(mode) {
     btn.classList.remove('stop-mode');
     btn.onclick = sendMessage;
   }
-}
-
-// sensitive 判定時の実行前確認カード。
-// state.pendingConfirm に状態を持たせ、renderMessages() の再描画をまたいでも消えないようにする。
-function buildConfirmCard() {
-  const { text, routerError } = state.pendingConfirm;
-  const card = document.createElement('div');
-  card.className = 'confirm-card';
-  card.innerHTML = `
-    <div class="confirm-title">⚠️ 実行前の確認</div>
-    <p>${routerError
-      ? '内容の自動判定に失敗したため、安全のため確認を求めています。'
-      : 'この依頼は<strong>送信・削除・金額・個人情報</strong>のいずれかに関わる可能性があると判定されました。'}<br>
-    高性能モデルで慎重に処理しますが、内容を確認のうえ続行してください。</p>
-    <div class="confirm-actions">
-      <button class="btn-primary" data-proceed>確認して続行</button>
-      <button class="btn-ghost" data-cancel>キャンセル</button>
-    </div>`;
-  card.querySelector('[data-proceed]').onclick = () => {
-    state.pendingConfirm = null;
-    executeChat(text, true);
-  };
-  card.querySelector('[data-cancel]').onclick = () => {
-    state.pendingConfirm = null;
-    // 末尾がこの確認に対応する未送信発言であれば取り消す(別発言の混入を避ける)
-    const last = state.messages[state.messages.length - 1];
-    if (last && last.role === 'user' && last.content === text) state.messages.pop();
-    renderMessages();
-  };
-  return card;
 }
 
 // ---------- 管理画面 ----------

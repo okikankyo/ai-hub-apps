@@ -595,7 +595,7 @@ async function handle(req, res, method, pathname, url) {
 }
 
 async function handleChat(req, res, user) {
-  const { conversation_id, message, confirmed, model_pref } = await readBody(req);
+  const { conversation_id, message, model_pref } = await readBody(req);
   const text = String(message || '').trim();
   if (!text) return json(res, 400, { error: 'メッセージが空です' });
 
@@ -614,40 +614,14 @@ async function handleChat(req, res, user) {
     });
   }
 
-  // ルーティング: 内容に応じてモデルを自動選択
+  // モデル・画像生成はユーザーが手動で選択する(自動判定は行わない)
   let route;
-  if (confirmed === true) {
-    // sensitive の人間確認済み → 高性能モデルで実行(再分類しない)
-    route = { category: 'sensitive', model: openai.HEAVY_MODEL, promptTokens: 0, completionTokens: 0 };
-  } else if (model_pref === 'light') {
-    route = { category: 'light', model: openai.LIGHT_MODEL, promptTokens: 0, completionTokens: 0 };
-  } else if (model_pref === 'heavy') {
-    route = { category: 'heavy', model: openai.HEAVY_MODEL, promptTokens: 0, completionTokens: 0 };
+  if (model_pref === 'heavy') {
+    route = { category: 'heavy', model: openai.HEAVY_MODEL };
+  } else if (model_pref === 'image') {
+    route = { category: 'image', model: openai.IMAGE_MODEL };
   } else {
-    route = await openai.routeMessage(text);
-  }
-  // 画像添付があるメッセージは、ルーターの誤判定で「画像生成」に回されると
-  // 添付した写真が一切見られないまま無関係な新規画像が生成されてしまうため、
-  // 必ずチャット(高性能モデルによる画像読み取り)に倒す
-  if (route.category === 'image' && /\/api\/files\/[a-f0-9]{16,32}\.(?:png|jpe?g|webp|gif)/.test(text)) {
-    route = { category: 'heavy', model: openai.HEAVY_MODEL, promptTokens: route.promptTokens, completionTokens: route.completionTokens };
-  }
-  if (route.promptTokens || route.completionTokens) {
-    const cost = openai.costJpy(openai.CLASSIFIER_MODEL, route.promptTokens, route.completionTokens);
-    db.prepare(`
-      INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
-      VALUES (?, ?, ?, 'classify', ?, ?, ?)
-    `).run(user.id, user.department_id, openai.CLASSIFIER_MODEL, route.promptTokens, route.completionTokens, cost);
-  }
-
-  // 送信・削除・金額・個人情報が絡むものは実行前に人間確認を求める
-  // (ルーター障害で判定できなかった場合もフェイルクローズでここに来る)
-  if (route.category === 'sensitive' && confirmed !== true) {
-    return json(res, 200, {
-      needs_confirmation: true,
-      category: 'sensitive',
-      router_error: route.routerFailed === true,
-    });
+    route = { category: 'light', model: openai.LIGHT_MODEL };
   }
 
   // ユーザー発言を保存し、初回ならタイトルに反映

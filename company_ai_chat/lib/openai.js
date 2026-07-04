@@ -127,68 +127,11 @@ async function streamChat(history, onDelta, model = LIGHT_MODEL, signal) {
   };
 }
 
-// ---- ルーティング ----
-// メッセージ内容から利用モデルを自動選択する。
-//   light:     軽い質問・言い換え・SNS文案・メール返信案・チェック・項目整理・画像プロンプト整理
-//   heavy:     仕様整理・bot設計・指示書・バグ調査・DB設計・セキュリティ
-//   image:     実際の画像生成
-//   sensitive: 送信・削除・金額・個人情報 → heavy モデル + 実行前に人間確認
-
-const ROUTER_PROMPT =
-  '社内チャットツールのモデルルーターです。ユーザーのメッセージを次の4分類のうち1つに分類し、' +
-  '分類名だけを answer してください。\n' +
-  'light: 軽い質問、言い換え、SNS文案、メール返信案、文章チェック、項目の整理、画像生成プロンプトの文章化・整理\n' +
-  'heavy: 仕様の整理、bot・システムの設計、開発指示書の作成、バグ・不具合の調査、データベース設計、セキュリティに関わる相談\n' +
-  'image: 何を描くか(被写体・構図など)が具体的に示されていて、今すぐ実際に画像を生成してほしい依頼。\n' +
-  '  ただし、用途・テイスト・要素・縦横比などの要件確認を先に求めている依頼、進め方の指示だけのメッセージ、\n' +
-  '  具体的な内容がまだ決まっていない依頼は image ではなく heavy に分類すること(先に会話で要件を詰めるため)。\n' +
-  'sensitive: メール送信やデータ削除など実行を伴う操作、金額・支払い・請求に関わるもの、個人情報を含む・扱うもの\n' +
-  '回答は light / heavy / image / sensitive のいずれか1語のみ。';
-
-function modelFor(category) {
-  if (category === 'heavy' || category === 'sensitive') return HEAVY_MODEL;
-  if (category === 'image') return IMAGE_MODEL;
-  return LIGHT_MODEL;
-}
-
 // gpt-5系・o系は temperature 指定と max_tokens を受け付けない(既定値+max_completion_tokens を使う)
 function classifierParams(maxTokens) {
   const params = { max_completion_tokens: maxTokens };
   if (!/^(gpt-5|o\d)/.test(CLASSIFIER_MODEL)) params.temperature = 0;
   return params;
-}
-
-async function routeMessage(text) {
-  if (MOCK) return mockRoute(text);
-  try {
-    const res = await fetch(`${API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify({
-        model: CLASSIFIER_MODEL,
-        ...classifierParams(16),
-        messages: [
-          { role: 'system', content: ROUTER_PROMPT },
-          { role: 'user', content: text.slice(0, 2000) },
-        ],
-      }),
-    });
-    if (!res.ok) throw new Error(`router HTTP ${res.status}`);
-    const json = await res.json();
-    const answer = (json.choices?.[0]?.message?.content || '').toLowerCase();
-    const category = ['sensitive', 'image', 'heavy', 'light'].find((c) => answer.includes(c)) || 'light';
-    return {
-      category,
-      model: modelFor(category),
-      promptTokens: json.usage?.prompt_tokens ?? 0,
-      completionTokens: json.usage?.completion_tokens ?? 0,
-    };
-  } catch (err) {
-    console.error('[router]', err.message);
-    // フェイルクローズ: 判定できない間は sensitive 扱いにして本人確認を挟み、
-    // 確認ゲートが黙って無効化されるのを防ぐ(確認後は高性能モデルで処理される)
-    return { category: 'sensitive', model: HEAVY_MODEL, routerFailed: true, promptTokens: 0, completionTokens: 0 };
-  }
 }
 
 // ---- 画像生成 ----
@@ -300,24 +243,6 @@ async function mockStream(history, onDelta, model = LIGHT_MODEL, signal) {
   };
 }
 
-function mockRoute(text) {
-  let category = 'light';
-  const looksLikeImageRequest =
-    /(画像|イラスト|ロゴ|写真)[^。]*(生成|作成|作って|描いて)|(生成|作って|描いて)[^。]*(画像|イラスト|ロゴ)/.test(text);
-  // 用途・テイスト等の要件確認を求めるだけのメッセージ(テンプレート等)は
-  // 先に会話で詰めるべきなので、image ではなく heavy に倒す
-  const isRequirementsGathering = /確認して|用途|テイスト|縦横比|要素・色/.test(text);
-
-  if (/送信|削除|支払|振込|請求|金額|個人情報|マイナンバー|パスワード|住所|電話番号/.test(text)) {
-    category = 'sensitive';
-  } else if (looksLikeImageRequest && !isRequirementsGathering) {
-    category = 'image';
-  } else if (isRequirementsGathering || /バグ|不具合|設計|セキュリティ|仕様|データベース|DB|指示書|アーキテクチャ/.test(text)) {
-    category = 'heavy';
-  }
-  return { category, model: modelFor(category), promptTokens: 0, completionTokens: 0 };
-}
-
 function mockImage(prompt) {
   const file = `${crypto.randomBytes(12).toString('hex')}.svg`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
@@ -337,6 +262,6 @@ function mockClassify(text) {
 }
 
 module.exports = {
-  streamChat, classify, costJpy, estimateTokens, routeMessage, generateImage,
+  streamChat, classify, costJpy, estimateTokens, generateImage,
   CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
 };
