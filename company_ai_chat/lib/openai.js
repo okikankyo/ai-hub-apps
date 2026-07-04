@@ -46,29 +46,37 @@ const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT ||
   'あなたは社内向けAIアシスタントです。丁寧な日本語で、簡潔かつ正確に回答してください。';
 
-// 添付画像(/api/files/... のmarkdown参照)を含むユーザー発言を、
-// OpenAIのマルチモーダル形式(text + image_url)に変換する。
+// 添付画像(/api/files/... のmarkdown参照)関連の共通処理
 const ATTACHED_IMG_RE = /!\[[^\]]*\]\((\/api\/files\/[a-f0-9]{16,32}\.(?:png|jpg|jpeg|webp|gif))\)/g;
 const ATTACH_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+
+// テキスト中の添付画像参照から実ファイルを読み込む(コスト対策で1メッセージ4枚まで)
+function readAttachedImages(text) {
+  const refs = [...String(text).matchAll(ATTACHED_IMG_RE)];
+  const files = [];
+  for (const r of refs.slice(0, 4)) {
+    const name = r[1].split('/').pop();
+    try {
+      const buffer = fs.readFileSync(path.join(IMAGES_DIR, name));
+      files.push({ buffer, mime: ATTACH_MIME[name.split('.').pop()], name });
+    } catch { /* ファイルが消えていたら無視 */ }
+  }
+  return files;
+}
+
+// 添付画像を含むユーザー発言を、OpenAIのマルチモーダル形式(text + image_url)に変換する。
 function toApiMessages(history) {
   return history.map((m) => {
     if (m.role !== 'user' || !String(m.content).includes('/api/files/')) return m;
-    const refs = [...String(m.content).matchAll(ATTACHED_IMG_RE)];
-    if (refs.length === 0) return m;
+    const images = readAttachedImages(m.content);
+    if (images.length === 0) return m;
     const parts = [];
     const text = String(m.content).replace(ATTACHED_IMG_RE, '').trim();
     if (text) parts.push({ type: 'text', text });
-    for (const r of refs.slice(0, 4)) { // コスト対策で1メッセージ4枚まで
-      const file = r[1].split('/').pop();
-      try {
-        const data = fs.readFileSync(path.join(IMAGES_DIR, file));
-        parts.push({
-          type: 'image_url',
-          image_url: { url: `data:${ATTACH_MIME[file.split('.').pop()]};base64,${data.toString('base64')}` },
-        });
-      } catch { /* ファイルが消えていたらテキストのみで続行 */ }
+    for (const img of images) {
+      parts.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.buffer.toString('base64')}` } });
     }
-    return parts.length ? { role: 'user', content: parts } : m;
+    return { role: 'user', content: parts };
   });
 }
 
@@ -155,20 +163,8 @@ function truncatePrompt(prompt) {
   return prompt.length > limit ? prompt.slice(0, limit) : prompt;
 }
 
-async function generateImage(prompt) {
-  if (MOCK) return mockImage(prompt);
-  // 入力されたテキストをそのままプロンプトとしてAPIに渡す
-  const res = await fetch(`${API_BASE}/images/generations`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-    body: JSON.stringify({ model: IMAGE_MODEL, prompt: truncatePrompt(prompt), size: pickImageSize(prompt) }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`image API error ${res.status}: ${body.slice(0, 300)}`);
-  }
-  const json = await res.json();
-  // gpt-image-1 は b64_json、dall-e-3 など URL 応答のモデルにも対応する
+// gpt-image-1 は b64_json、dall-e-3 など URL 応答のモデルにも対応する
+async function saveImageFromResponse(json) {
   const item = json.data?.[0] || {};
   let buf;
   if (item.b64_json) {
@@ -182,7 +178,55 @@ async function generateImage(prompt) {
   }
   const file = `${crypto.randomBytes(12).toString('hex')}.png`;
   fs.writeFileSync(path.join(IMAGES_DIR, file), buf);
+  return file;
+}
+
+async function generateImage(prompt) {
+  if (MOCK) return mockImage(prompt);
+  // 入力されたテキストをそのままプロンプトとしてAPIに渡す
+  const res = await fetch(`${API_BASE}/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
+    body: JSON.stringify({ model: IMAGE_MODEL, prompt: truncatePrompt(prompt), size: pickImageSize(prompt) }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`image API error ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const file = await saveImageFromResponse(await res.json());
   return { file, model: IMAGE_MODEL, costJpy: IMAGE_COST_JPY };
+}
+
+// 添付された写真を実際に読み込ませて編集・合成する(images/generations はテキストのみで
+// 写真を渡せないため、写真ありの場合は images/edits を使う)
+async function editImage(prompt, attachedImages) {
+  if (MOCK) return mockImage(prompt);
+  const form = new FormData();
+  form.append('model', IMAGE_MODEL);
+  form.append('prompt', truncatePrompt(prompt));
+  form.append('size', pickImageSize(prompt));
+  for (const img of attachedImages) {
+    form.append('image[]', new Blob([img.buffer], { type: img.mime }), img.name);
+  }
+  const res = await fetch(`${API_BASE}/images/edits`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${API_KEY}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`image edit API error ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const file = await saveImageFromResponse(await res.json());
+  return { file, model: IMAGE_MODEL, costJpy: IMAGE_COST_JPY };
+}
+
+// 画像生成の窓口: 添付写真があれば images/edits(写真を実際に読み込ませる)、
+// なければ images/generations(テキストのみ)を自動で使い分ける。
+async function createImage(prompt) {
+  const attached = readAttachedImages(prompt);
+  const cleanPrompt = attached.length ? String(prompt).replace(ATTACHED_IMG_RE, '').trim() : prompt;
+  return attached.length ? editImage(cleanPrompt, attached) : generateImage(cleanPrompt);
 }
 
 // ユーザー発言が仕事かプライベートかを判定する。ラベルのみ返す。
@@ -269,6 +313,6 @@ function mockClassify(text) {
 }
 
 module.exports = {
-  streamChat, classify, costJpy, estimateTokens, generateImage,
+  streamChat, classify, costJpy, estimateTokens, createImage,
   CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
 };

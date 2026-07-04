@@ -728,7 +728,7 @@ async function handleChat(req, res, user) {
     try {
       send('delta', { text: '🎨 画像を生成しています…' });
       // 入力されたテキストをそのままプロンプトとしてAPIに渡す
-      const img = await openai.generateImage(text);
+      const img = await openai.createImage(text);
       const content = `![生成画像](/api/files/${img.file})`;
       const cost = saveAssistant(content, img.model, 0, 0, img.costJpy);
       send('replace', { text: content });
