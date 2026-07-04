@@ -41,10 +41,21 @@ db.exec(`
     expires_at TEXT NOT NULL
   );
 
+  -- チャットをまとめるプロジェクト(フォルダ)。ユーザーごとに管理。
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  );
+
   CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
     title TEXT NOT NULL DEFAULT '新しいチャット',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    project_id INTEGER REFERENCES projects(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
   );
@@ -126,8 +137,6 @@ db.exec(`
   // 「前倒しで使う」を押した回数(月ごとにリセット、advance_month で対象月を判定)
   if (!deptCols.includes('advance_used')) db.exec('ALTER TABLE departments ADD COLUMN advance_used INTEGER NOT NULL DEFAULT 0');
   if (!deptCols.includes('advance_month')) db.exec('ALTER TABLE departments ADD COLUMN advance_month TEXT');
-  // ユーザー自身が押せる「リセット」。対象期間(YYYY-MM-P{0-9})中だけロックを解除する
-  if (!deptCols.includes('self_unlock_period')) db.exec('ALTER TABLE departments ADD COLUMN self_unlock_period TEXT');
 
   // テンプレートを全体共有から「ユーザーごとの個人管理」に変更
   const tplCols = db.prepare('PRAGMA table_info(prompt_templates)').all().map((c) => c.name);
@@ -136,6 +145,12 @@ db.exec(`
     // 旧・全員共有だった初期テンプレートは持ち主がいないので破棄する(各ユーザーは初回アクセス時に個人用として再生成される)
     db.exec('DELETE FROM prompt_templates WHERE user_id IS NULL');
   }
+
+  // 会話の整理機能(ピン留め・アーカイブ・プロジェクト分け)
+  const convCols = db.prepare('PRAGMA table_info(conversations)').all().map((c) => c.name);
+  if (!convCols.includes('pinned')) db.exec('ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+  if (!convCols.includes('archived')) db.exec('ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
+  if (!convCols.includes('project_id')) db.exec('ALTER TABLE conversations ADD COLUMN project_id INTEGER REFERENCES projects(id)');
 }
 
 function hashPassword(password) {

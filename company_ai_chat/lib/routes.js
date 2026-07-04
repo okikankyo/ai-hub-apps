@@ -78,9 +78,8 @@ function deptStatus(dept) {
   const releasedPeriods = Math.min(PERIOD_COUNT, info.periodsElapsed + advanceUsed);
   const releasedBudget = dept.monthly_budget_jpy * releasedPeriods / PERIOD_COUNT;
   const unlockedByAdmin = dept.unlock_month === info.monthKey;
-  const selfUnlocked = dept.self_unlock_period === info.periodKey;
   const overReleased = used >= releasedBudget;
-  const locked = overReleased && !unlockedByAdmin && !selfUnlocked;
+  const locked = overReleased && !unlockedByAdmin;
   return {
     id: dept.id,
     name: dept.name,
@@ -90,7 +89,6 @@ function deptStatus(dept) {
     locked,
     over_budget: overReleased,
     unlocked_by_admin: unlockedByAdmin,
-    self_unlocked: selfUnlocked,
     // ペース配分(ユーザー向け表示用): 総額ではなく期間の進み具合を見せる
     period_number: info.periodsElapsed,
     period_total: PERIOD_COUNT,
@@ -169,12 +167,12 @@ function json(res, status, body) {
   return true; // handle() の「処理済み」戻り値としてそのまま返せるようにする
 }
 
-async function readBody(req) {
+async function readBody(req, maxBytes = 1_000_000) {
   const chunks = [];
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > 1_000_000) throw new Error('body too large');
+    if (size > maxBytes) throw new Error('body too large');
     chunks.push(c);
   }
   try {
@@ -429,14 +427,6 @@ async function handle(req, res, method, pathname, url) {
     return json(res, 403, { error: 'アカウントは管理者の承認待ちです。承認されるまでお待ちください。', pending: true });
   }
 
-  // 期間ロック中でも、ユーザー自身の判断で今期だけ利用を続ける「リセット」ボタン
-  if (method === 'POST' && pathname === '/api/budget/reset') {
-    if (!user.department_id) return json(res, 400, { error: '部署が設定されていません。' });
-    const info = periodInfo();
-    db.prepare('UPDATE departments SET self_unlock_period = ? WHERE id = ?').run(info.periodKey, user.department_id);
-    return json(res, 200, { department: getUserDept(user) });
-  }
-
   // 次の期間の予算枠を先取りする「前倒しで使う」(月3回まで)
   if (method === 'POST' && pathname === '/api/budget/advance') {
     if (!user.department_id) return json(res, 400, { error: '部署が設定されていません。' });
@@ -454,15 +444,53 @@ async function handle(req, res, method, pathname, url) {
     return json(res, 200, { department: getUserDept(user) });
   }
 
+  // プロジェクト(チャットのフォルダ分け)
+  if (method === 'GET' && pathname === '/api/projects') {
+    const rows = db.prepare('SELECT id, name FROM projects WHERE user_id = ? ORDER BY id').all(user.id);
+    return json(res, 200, rows);
+  }
+  if (method === 'POST' && pathname === '/api/projects') {
+    const { name } = await readBody(req);
+    const trimmed = String(name || '').trim().slice(0, 40);
+    if (!trimmed) return json(res, 400, { error: 'プロジェクト名を入力してください' });
+    const id = db.prepare('INSERT INTO projects (user_id, name) VALUES (?, ?)').run(user.id, trimmed).lastInsertRowid;
+    return json(res, 200, { id });
+  }
+  const projectMatch = pathname.match(/^\/api\/projects\/(\d+)$/);
+  if (projectMatch) {
+    const projId = Number(projectMatch[1]);
+    const proj = db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(projId, user.id);
+    if (!proj) return json(res, 404, { error: 'プロジェクトが見つかりません' });
+    if (method === 'PATCH') {
+      const { name } = await readBody(req);
+      const trimmed = String(name || '').trim().slice(0, 40);
+      if (!trimmed) return json(res, 400, { error: 'プロジェクト名を入力してください' });
+      db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(trimmed, projId);
+      return json(res, 200, { ok: true });
+    }
+    if (method === 'DELETE') {
+      // 中のチャットは削除せず、プロジェクト未所属に戻す
+      db.prepare('UPDATE conversations SET project_id = NULL WHERE project_id = ?').run(projId);
+      db.prepare('DELETE FROM projects WHERE id = ?').run(projId);
+      return json(res, 200, { ok: true });
+    }
+  }
+
   // 会話
   if (method === 'GET' && pathname === '/api/conversations') {
     const rows = db.prepare(
-      'SELECT id, title, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC'
+      'SELECT id, title, updated_at, pinned, archived, project_id FROM conversations WHERE user_id = ? ORDER BY pinned DESC, updated_at DESC'
     ).all(user.id);
     return json(res, 200, rows);
   }
   if (method === 'POST' && pathname === '/api/conversations') {
-    const id = db.prepare('INSERT INTO conversations (user_id) VALUES (?)').run(user.id).lastInsertRowid;
+    const { project_id } = await readBody(req);
+    let projId = null;
+    if (project_id) {
+      const proj = db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(Number(project_id), user.id);
+      if (proj) projId = proj.id;
+    }
+    const id = db.prepare('INSERT INTO conversations (user_id, project_id) VALUES (?, ?)').run(user.id, projId).lastInsertRowid;
     return json(res, 200, { id });
   }
 
@@ -477,13 +505,38 @@ async function handle(req, res, method, pathname, url) {
       ).all(convId);
       return json(res, 200, rows);
     }
+    // 名前の変更・ピン留め・アーカイブ・プロジェクト移動
+    if (method === 'PATCH' && !convMatch[2]) {
+      const body = await readBody(req);
+      if (body.title !== undefined) {
+        const title = String(body.title).trim().slice(0, 60);
+        if (!title) return json(res, 400, { error: 'タイトルを入力してください' });
+        db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title, convId);
+      }
+      if (body.pinned !== undefined) {
+        db.prepare('UPDATE conversations SET pinned = ? WHERE id = ?').run(body.pinned ? 1 : 0, convId);
+      }
+      if (body.archived !== undefined) {
+        db.prepare('UPDATE conversations SET archived = ? WHERE id = ?').run(body.archived ? 1 : 0, convId);
+      }
+      if (body.project_id !== undefined) {
+        if (body.project_id === null) {
+          db.prepare('UPDATE conversations SET project_id = NULL WHERE id = ?').run(convId);
+        } else {
+          const proj = db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(Number(body.project_id), user.id);
+          if (!proj) return json(res, 404, { error: 'プロジェクトが見つかりません' });
+          db.prepare('UPDATE conversations SET project_id = ? WHERE id = ?').run(proj.id, convId);
+        }
+      }
+      return json(res, 200, { ok: true });
+    }
     if (method === 'DELETE' && !convMatch[2]) {
-      // 会話内の生成画像ファイルも一緒に削除する(孤児ファイル防止)
+      // 会話内の生成画像・添付画像ファイルも一緒に削除する(孤児ファイル防止)
       const imageRows = db.prepare(
         "SELECT content FROM messages WHERE conversation_id = ? AND content LIKE '%/api/files/%'"
       ).all(convId);
       for (const row of imageRows) {
-        for (const m of row.content.matchAll(/\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg))/g)) {
+        for (const m of row.content.matchAll(/\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg|jpg|jpeg|webp|gif))/g)) {
           try { fs.unlinkSync(path.join(openai.IMAGES_DIR, m[1])); } catch { /* 既に無ければ無視 */ }
         }
       }
@@ -497,8 +550,26 @@ async function handle(req, res, method, pathname, url) {
     return handleChat(req, res, user);
   }
 
-  // 生成画像の配信(ログイン必須、ファイル名はランダムhexのみ許可)
-  const fileMatch = pathname.match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg))$/);
+  // 添付画像のアップロード(base64 JSON、8MBまで)
+  if (method === 'POST' && pathname === '/api/upload') {
+    let body;
+    try {
+      body = await readBody(req, 12_000_000); // base64膨張分を見込んだ上限
+    } catch {
+      return json(res, 400, { error: 'ファイルが大きすぎます(8MBまで)' });
+    }
+    const ext = String(body.name || '').toLowerCase().match(/\.(png|jpe?g|webp|gif)$/)?.[1];
+    if (!ext) return json(res, 400, { error: '対応していない形式です(png / jpg / webp / gif)' });
+    const buf = Buffer.from(String(body.data || ''), 'base64');
+    if (buf.length === 0) return json(res, 400, { error: 'ファイルの読み込みに失敗しました' });
+    if (buf.length > 8_000_000) return json(res, 400, { error: 'ファイルサイズは8MBまでです' });
+    const file = `${crypto.randomBytes(12).toString('hex')}.${ext === 'jpeg' ? 'jpg' : ext}`;
+    await fs.promises.writeFile(path.join(openai.IMAGES_DIR, file), buf);
+    return json(res, 200, { url: `/api/files/${file}` });
+  }
+
+  // 生成画像・添付画像の配信(ログイン必須、ファイル名はランダムhexのみ許可)
+  const fileMatch = pathname.match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg|jpg|jpeg|webp|gif))$/);
   if (method === 'GET' && fileMatch) {
     const filePath = path.join(openai.IMAGES_DIR, fileMatch[1]);
     let data;
@@ -507,8 +578,12 @@ async function handle(req, res, method, pathname, url) {
     } catch {
       return json(res, 404, { error: 'not found' });
     }
+    const types = {
+      png: 'image/png', svg: 'image/svg+xml', jpg: 'image/jpeg',
+      jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    };
     res.writeHead(200, {
-      'Content-Type': fileMatch[1].endsWith('.png') ? 'image/png' : 'image/svg+xml',
+      'Content-Type': types[fileMatch[1].split('.').pop()],
       'Cache-Control': 'private, max-age=86400',
     });
     res.end(data);
@@ -534,7 +609,7 @@ async function handleChat(req, res, user) {
   if (dept.locked) {
     return json(res, 403, {
       error: `部署「${dept.name}」の今期(${dept.period_number}/${dept.period_total}期)の利用枠を使い切りました。` +
-        `次の期間(${dept.next_period_label}〜)までお待ちいただくか、「前倒しで使う」「リセット」ボタンをご利用ください。`,
+        `次の期間(${dept.next_period_label}〜)までお待ちいただくか、「前倒しで使う」ボタンをご利用ください。`,
       locked: true,
     });
   }
@@ -573,7 +648,12 @@ async function handleChat(req, res, user) {
   db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)').run(conv.id, 'user', text);
   const msgCount = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id).n;
   if (msgCount === 1) {
-    db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(text.slice(0, 30), conv.id);
+    // タイトルには添付ファイル(画像参照・テキスト本文)を含めない
+    const plain = text
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/【添付ファイル: [^】]*】\n```[\s\S]*?```/g, '')
+      .trim();
+    db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run((plain || '添付ファイル').slice(0, 30), conv.id);
   }
 
   const history = db.prepare(

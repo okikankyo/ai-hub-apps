@@ -46,6 +46,32 @@ const SYSTEM_PROMPT =
   process.env.SYSTEM_PROMPT ||
   'あなたは社内向けAIアシスタントです。丁寧な日本語で、簡潔かつ正確に回答してください。';
 
+// 添付画像(/api/files/... のmarkdown参照)を含むユーザー発言を、
+// OpenAIのマルチモーダル形式(text + image_url)に変換する。
+const ATTACHED_IMG_RE = /!\[[^\]]*\]\((\/api\/files\/[a-f0-9]{16,32}\.(?:png|jpg|jpeg|webp|gif))\)/g;
+const ATTACH_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+function toApiMessages(history) {
+  return history.map((m) => {
+    if (m.role !== 'user' || !String(m.content).includes('/api/files/')) return m;
+    const refs = [...String(m.content).matchAll(ATTACHED_IMG_RE)];
+    if (refs.length === 0) return m;
+    const parts = [];
+    const text = String(m.content).replace(ATTACHED_IMG_RE, '').trim();
+    if (text) parts.push({ type: 'text', text });
+    for (const r of refs.slice(0, 4)) { // コスト対策で1メッセージ4枚まで
+      const file = r[1].split('/').pop();
+      try {
+        const data = fs.readFileSync(path.join(IMAGES_DIR, file));
+        parts.push({
+          type: 'image_url',
+          image_url: { url: `data:${ATTACH_MIME[file.split('.').pop()]};base64,${data.toString('base64')}` },
+        });
+      } catch { /* ファイルが消えていたらテキストのみで続行 */ }
+    }
+    return parts.length ? { role: 'user', content: parts } : m;
+  });
+}
+
 // チャット補完をストリーミングで実行する。
 // onDelta(text) がトークンごとに呼ばれ、完了時に { content, promptTokens, completionTokens, model } を返す。
 async function streamChat(history, onDelta, model = LIGHT_MODEL, signal) {
@@ -59,7 +85,7 @@ async function streamChat(history, onDelta, model = LIGHT_MODEL, signal) {
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
+      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...toApiMessages(history)],
       stream: true,
       stream_options: { include_usage: true },
     }),
@@ -238,7 +264,7 @@ async function classify(text) {
 }
 
 function estimateTokens(history) {
-  return Math.ceil(history.reduce((n, m) => n + m.content.length, 0) / 3);
+  return Math.ceil(history.reduce((n, m) => n + String(m.content).length, 0) / 3);
 }
 
 // ---- モックモード(APIキーなしでの動作確認用) ----

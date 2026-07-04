@@ -19,6 +19,12 @@ const state = {
   templateEditMode: false, // チャット画面内でのテンプレート編集モード
   templateSnapshot: null,  // 編集モードに入った時点のテンプレート一覧(「リセット」で戻す先)
   abortController: null,   // 生成中の「停止」ボタン用
+  projects: [],            // チャットをまとめるプロジェクト(フォルダ)
+  projectsCollapsed: {},   // プロジェクトIDごとの折りたたみ状態
+  archivedOpen: false,     // サイドバーの「アーカイブ済み」を開いているか
+  renamingConvId: null,    // インラインで名前変更中の会話ID
+  pendingProjectId: null,  // 「このプロジェクトで新規チャット」で次に作る会話の所属先
+  attachments: [],         // 送信前の添付ファイル [{kind:'image',url,name} | {kind:'text',name,content}]
 };
 
 const TEMPLATE_VISIBLE_COUNT = 3; // これを超える分はドリルダウンで畳む
@@ -70,6 +76,14 @@ function renderMarkdown(text) {
   return html;
 }
 
+// ユーザー発言の表示(添付画像のmarkdown参照だけを<img>にする。他はプレーンテキスト)
+function renderUserContent(text) {
+  return esc(text).replace(
+    /!\[([^\]]*)\]\((\/api\/files\/[\w.-]+)\)/g,
+    '<img src="$2" alt="$1" class="attach-image" loading="lazy">'
+  );
+}
+
 // ---------- 初期化 ----------
 
 async function loadMe() {
@@ -89,6 +103,7 @@ async function init() {
       return;
     }
     await loadConversations();
+    await loadProjects();
     try { state.templates = await api('/api/templates'); } catch { state.templates = []; }
     render();
   } else {
@@ -239,6 +254,10 @@ async function loadConversations() {
   state.conversations = await api('/api/conversations');
 }
 
+async function loadProjects() {
+  try { state.projects = await api('/api/projects'); } catch { state.projects = []; }
+}
+
 // モバイル幅でのサイドバー(会話履歴)開閉。PC幅では見た目に影響しない。
 function openMobileSidebar() {
   document.querySelector('.sidebar')?.classList.add('mobile-open');
@@ -296,7 +315,8 @@ function render() {
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <main class="main" id="main"></main>
     </div>
-    <div class="chart-tooltip" id="chart-tooltip"></div>`;
+    <div class="chart-tooltip" id="chart-tooltip"></div>
+    <div class="ctx-menu" id="ctx-menu"></div>`;
 
   document.getElementById('sidebar-backdrop').onclick = closeMobileSidebar;
 
@@ -313,6 +333,7 @@ function render() {
     state.currentConvId = null;
     state.messages = [];
     state.pendingConfirm = null;
+    state.pendingProjectId = null;
     state.view = 'chat';
     closeMobileSidebar();
     render();
@@ -335,36 +356,258 @@ function render() {
 
 function renderConvList() {
   const el = document.getElementById('conv-list');
-  el.innerHTML = state.conversations.map((c) => `
-    <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''}" data-id="${c.id}">
-      <span>${esc(c.title)}</span>
-      <button class="del" data-del="${c.id}" title="削除">✕</button>
-    </div>`).join('');
-  el.querySelectorAll('.conv-item').forEach((item) => {
-    item.onclick = async (e) => {
-      if (e.target.dataset.del) return;
-      state.currentConvId = Number(item.dataset.id);
-      state.view = 'chat';
-      state.pendingConfirm = null;
-      closeMobileSidebar();
-      state.messages = await api(`/api/conversations/${state.currentConvId}/messages`);
-      render();
+  const convs = state.conversations;
+
+  const item = (c, indent) => `
+    <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''} ${indent ? 'indent' : ''}" data-id="${c.id}">
+      ${c.pinned ? '<span class="pin-mark">📌</span>' : ''}
+      ${state.renamingConvId === c.id
+        ? `<input class="conv-rename" data-rename-input="${c.id}" value="${esc(c.title)}" maxlength="60">`
+        : `<span class="conv-title">${esc(c.title)}</span>`}
+      <button class="conv-menu-btn" data-menu="${c.id}" title="メニュー">…</button>
+    </div>`;
+
+  const pinnedList = convs.filter((c) => c.pinned && !c.archived && !c.project_id);
+  const normal = convs.filter((c) => !c.pinned && !c.archived && !c.project_id);
+  const archived = convs.filter((c) => c.archived);
+
+  let html = `<div class="side-section">
+    <span>プロジェクト</span>
+    <button class="side-add" id="add-project" title="新しいプロジェクト">＋</button>
+  </div>`;
+  for (const p of state.projects) {
+    const children = convs.filter((c) => c.project_id === p.id && !c.archived);
+    const collapsed = state.projectsCollapsed[p.id];
+    html += `
+      <div class="project-item" data-project="${p.id}">
+        <span class="proj-caret">${collapsed ? '▸' : '▾'}</span>
+        <span class="conv-title">📁 ${esc(p.name)}</span>
+        <button class="conv-menu-btn" data-proj-menu="${p.id}" title="メニュー">…</button>
+      </div>`;
+    if (!collapsed) {
+      html += children.length
+        ? children.map((c) => item(c, true)).join('')
+        : '<div class="conv-empty">チャットがありません</div>';
+    }
+  }
+  if (state.projects.length === 0) html += '<div class="conv-empty">＋で作成できます</div>';
+
+  if (pinnedList.length) {
+    html += '<div class="side-section"><span>ピン留め</span></div>';
+    html += pinnedList.map((c) => item(c, false)).join('');
+  }
+
+  html += '<div class="side-section"><span>チャット</span></div>';
+  html += normal.length
+    ? normal.map((c) => item(c, false)).join('')
+    : '<div class="conv-empty">まだチャットがありません</div>';
+
+  if (archived.length) {
+    html += `<div class="side-section archived-toggle" id="archived-toggle">
+      <span>${state.archivedOpen ? '▾' : '▸'} アーカイブ済み(${archived.length})</span></div>`;
+    if (state.archivedOpen) html += archived.map((c) => item(c, false)).join('');
+  }
+
+  el.innerHTML = html;
+
+  el.querySelectorAll('.conv-item').forEach((row) => {
+    row.onclick = (e) => {
+      if (e.target.closest('.conv-menu-btn') || e.target.closest('.conv-rename')) return;
+      openConversation(Number(row.dataset.id));
+    };
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      openConvMenu(Number(row.dataset.id), e.clientX, e.clientY);
     };
   });
-  el.querySelectorAll('[data-del]').forEach((btn) => {
-    btn.onclick = async (e) => {
+  el.querySelectorAll('[data-menu]').forEach((btn) => {
+    btn.onclick = (e) => {
       e.stopPropagation();
+      const r = btn.getBoundingClientRect();
+      openConvMenu(Number(btn.dataset.menu), r.left, r.bottom + 4);
+    };
+  });
+  el.querySelectorAll('.project-item').forEach((row) => {
+    row.onclick = (e) => {
+      if (e.target.closest('.conv-menu-btn')) return;
+      const id = Number(row.dataset.project);
+      state.projectsCollapsed[id] = !state.projectsCollapsed[id];
+      renderConvList();
+    };
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      openProjectMenu(Number(row.dataset.project), e.clientX, e.clientY);
+    };
+  });
+  el.querySelectorAll('[data-proj-menu]').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const r = btn.getBoundingClientRect();
+      openProjectMenu(Number(btn.dataset.projMenu), r.left, r.bottom + 4);
+    };
+  });
+
+  const addProj = document.getElementById('add-project');
+  if (addProj) addProj.onclick = async (e) => {
+    e.stopPropagation();
+    const name = prompt('プロジェクト名');
+    if (!name || !name.trim()) return;
+    try {
+      await api('/api/projects', { method: 'POST', body: { name: name.trim() } });
+      await loadProjects();
+      renderConvList();
+    } catch (err) { alert(err.message); }
+  };
+  const archToggle = document.getElementById('archived-toggle');
+  if (archToggle) archToggle.onclick = () => {
+    state.archivedOpen = !state.archivedOpen;
+    renderConvList();
+  };
+
+  // インラインの名前変更(Enter/フォーカス外しで確定、Escで取消)
+  const renameInput = el.querySelector('.conv-rename');
+  if (renameInput) {
+    renameInput.focus();
+    renameInput.select();
+    let done = false;
+    const commit = async () => {
+      if (done) return;
+      done = true;
+      const id = Number(renameInput.dataset.renameInput);
+      const title = renameInput.value.trim();
+      state.renamingConvId = null;
+      if (title) {
+        try { await api(`/api/conversations/${id}`, { method: 'PATCH', body: { title } }); } catch (err) { alert(err.message); }
+        await loadConversations();
+      }
+      renderConvList();
+    };
+    renameInput.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); renameInput.blur(); }
+      if (e.key === 'Escape') { done = true; state.renamingConvId = null; renderConvList(); }
+    };
+    renameInput.onblur = commit;
+  }
+}
+
+async function openConversation(id) {
+  state.currentConvId = id;
+  state.view = 'chat';
+  state.pendingConfirm = null;
+  closeMobileSidebar();
+  state.messages = await api(`/api/conversations/${id}/messages`);
+  render();
+}
+
+// ---------- 会話・プロジェクトのコンテキストメニュー ----------
+
+function closeCtxMenu() {
+  const m = document.getElementById('ctx-menu');
+  if (m) { m.style.display = 'none'; m.innerHTML = ''; }
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#ctx-menu')) closeCtxMenu();
+});
+
+function showCtxMenu(items, x, y) {
+  const m = document.getElementById('ctx-menu');
+  if (!m) return;
+  m.innerHTML = items.map((it, i) =>
+    it === '-' ? '<div class="ctx-sep"></div>'
+      : `<button class="ctx-item ${it.danger ? 'danger' : ''}" data-ctx="${i}">${it.label}</button>`
+  ).join('');
+  m.style.display = 'block';
+  // 画面からはみ出さないように位置を調整
+  const rect = m.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+  m.querySelectorAll('[data-ctx]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      closeCtxMenu();
+      const it = items[Number(b.dataset.ctx)];
+      if (it && it.action) await it.action();
+    };
+  });
+}
+
+function openConvMenu(id, x, y) {
+  const c = state.conversations.find((v) => v.id === id);
+  if (!c) return;
+  const patch = async (body) => {
+    try { await api(`/api/conversations/${id}`, { method: 'PATCH', body }); } catch (err) { alert(err.message); }
+    await loadConversations();
+    renderConvList();
+  };
+  const items = [
+    { label: c.pinned ? '📌 ピン留めを解除' : '📌 ピン留め', action: () => patch({ pinned: !c.pinned }) },
+    { label: '✏️ 名前を変更', action: () => { state.renamingConvId = id; renderConvList(); } },
+  ];
+  for (const p of state.projects) {
+    if (p.id !== c.project_id) {
+      items.push({ label: `📁 「${esc(p.name)}」へ移動`, action: () => patch({ project_id: p.id }) });
+    }
+  }
+  if (c.project_id) items.push({ label: '📂 プロジェクトから出す', action: () => patch({ project_id: null }) });
+  items.push('-');
+  items.push({ label: c.archived ? '🗂 アーカイブを解除' : '🗂 アーカイブ', action: () => patch({ archived: !c.archived }) });
+  items.push({
+    label: '🗑 削除',
+    danger: true,
+    action: async () => {
       if (!confirm('この会話を削除しますか?')) return;
-      await api(`/api/conversations/${btn.dataset.del}`, { method: 'DELETE' });
-      if (state.currentConvId === Number(btn.dataset.del)) {
+      await api(`/api/conversations/${id}`, { method: 'DELETE' });
+      if (state.currentConvId === id) {
         state.currentConvId = null;
         state.messages = [];
         state.pendingConfirm = null;
       }
       await loadConversations();
       render();
-    };
+    },
   });
+  showCtxMenu(items, x, y);
+}
+
+function openProjectMenu(id, x, y) {
+  const p = state.projects.find((v) => v.id === id);
+  if (!p) return;
+  showCtxMenu([
+    {
+      label: '💬 このプロジェクトで新規チャット',
+      action: () => {
+        state.pendingProjectId = id;
+        state.currentConvId = null;
+        state.messages = [];
+        state.pendingConfirm = null;
+        state.view = 'chat';
+        closeMobileSidebar();
+        render();
+      },
+    },
+    {
+      label: '✏️ 名前を変更',
+      action: async () => {
+        const name = prompt('プロジェクト名', p.name);
+        if (!name || !name.trim()) return;
+        try { await api(`/api/projects/${id}`, { method: 'PATCH', body: { name: name.trim() } }); } catch (err) { alert(err.message); }
+        await loadProjects();
+        renderConvList();
+      },
+    },
+    '-',
+    {
+      label: '🗑 削除(チャットは残ります)',
+      danger: true,
+      action: async () => {
+        if (!confirm(`プロジェクト「${p.name}」を削除しますか?\n中のチャットは削除されず、一覧に戻ります。`)) return;
+        await api(`/api/projects/${id}`, { method: 'DELETE' });
+        await loadProjects();
+        await loadConversations();
+        renderConvList();
+      },
+    },
+  ], x, y);
 }
 
 // ---------- チャット画面 ----------
@@ -397,17 +640,21 @@ function renderChat() {
         <div class="icon">⏳</div>
         <h2>今期の利用枠を使い切りました</h2>
         <p>部署「${esc(dept.name)}」の今期(${dept.period_number}/${dept.period_total}期)の利用枠を使い切りました。<br>
-        次の期間(${dept.next_period_label}〜)までお待ちいただくか、下のボタンをご利用ください。<br>
+        ${dept.advance_available
+          ? `次の期間(${dept.next_period_label}〜)までお待ちいただくか、急ぎの場合は下のボタンで次の期間の枠を先に使えます。`
+          : `今月の前倒し(月3回)はすべて使用済みです。次の期間(${dept.next_period_label}〜)までお待ちください。`}<br>
         予算そのものを増やしたい場合は管理者にご相談ください。</p>
+        ${dept.advance_available ? `
         <div class="lock-actions">
-          ${dept.advance_available ? `<button class="btn-primary" id="btn-advance">前倒しで使う(残り${dept.advance_remaining}回/月)</button>` : ''}
-          <button class="btn-ghost" id="btn-self-reset">リセット</button>
-        </div>
+          <button class="btn-primary" id="btn-advance">前倒しで使う(残り${dept.advance_remaining}回/月)</button>
+        </div>` : ''}
       </div>
     </div>` : `
     <div class="messages" id="messages"><div class="thread" id="thread"></div></div>
     <div class="composer-wrap">
+      <div class="attach-row" id="attach-row"></div>
       <div class="composer">
+        <button class="attach-btn" id="attach-btn" title="ファイルを添付">📎</button>
         <select id="model-pref" class="model-pref" title="使用モデル">
           <option value="auto">🪄 自動</option>
           <option value="light">⚡ 軽量</option>
@@ -416,6 +663,8 @@ function renderChat() {
         <textarea id="input" rows="1" placeholder="メッセージを入力…(Shift+Enterで改行)"></textarea>
         <button class="send" id="send" title="送信">↑</button>
       </div>
+      <input type="file" id="file-input" multiple style="display:none"
+        accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.tsv,.json,.log">
       <div class="composer-note">「自動」では内容に応じて最適なモデルに振り分けます。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
     </div>`}
   `;
@@ -437,11 +686,6 @@ function renderChat() {
       } catch (err) {
         alert(err.message);
       }
-      await loadMe();
-      render();
-    };
-    document.getElementById('btn-self-reset').onclick = async () => {
-      await api('/api/budget/reset', { method: 'POST' });
       await loadMe();
       render();
     };
@@ -467,7 +711,68 @@ function renderChat() {
   const modelPref = document.getElementById('model-pref');
   modelPref.value = state.modelPref;
   modelPref.onchange = () => { state.modelPref = modelPref.value; };
+
+  // 添付ファイル
+  const fileInput = document.getElementById('file-input');
+  document.getElementById('attach-btn').onclick = () => fileInput.click();
+  fileInput.onchange = async () => {
+    for (const f of Array.from(fileInput.files)) await addAttachment(f);
+    fileInput.value = '';
+  };
+  renderAttachRow();
+
   input.focus();
+}
+
+// ---------- 添付ファイル ----------
+
+const TEXT_FILE_RE = /\.(txt|md|csv|tsv|json|log)$/i;
+
+async function addAttachment(file) {
+  if (state.attachments.length >= 4) return alert('添付は一度に4件までです');
+  if (/^image\//.test(file.type)) {
+    if (file.size > 8_000_000) return alert(`${file.name}: 画像は8MBまでです`);
+    try {
+      const data = await fileToBase64(file);
+      const { url } = await api('/api/upload', { method: 'POST', body: { name: file.name, data } });
+      // ファイル名の [ ] ( ) はmarkdown参照を壊すので除去しておく
+      state.attachments.push({ kind: 'image', url, name: file.name.replace(/[[\]()]/g, '') || '画像' });
+    } catch (err) {
+      return alert(`${file.name}: ${err.message}`);
+    }
+  } else if (TEXT_FILE_RE.test(file.name)) {
+    if (file.size > 200_000) return alert(`${file.name}: テキストファイルは200KBまでです`);
+    state.attachments.push({ kind: 'text', name: file.name, content: await file.text() });
+  } else {
+    return alert(`${file.name}: 対応していない形式です(画像 / txt / md / csv / json など)`);
+  }
+  renderAttachRow();
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(new Error('読み込みに失敗しました'));
+    r.readAsDataURL(file);
+  });
+}
+
+function renderAttachRow() {
+  const row = document.getElementById('attach-row');
+  if (!row) return;
+  row.innerHTML = state.attachments.map((a, i) => `
+    <span class="attach-chip">
+      ${a.kind === 'image' ? `<img src="${a.url}" alt="">` : '📄'} ${esc(a.name)}
+      <button data-rm-att="${i}" title="削除">✕</button>
+    </span>`).join('');
+  row.style.display = state.attachments.length ? 'flex' : 'none';
+  row.querySelectorAll('[data-rm-att]').forEach((b) => {
+    b.onclick = () => {
+      state.attachments.splice(Number(b.dataset.rmAtt), 1);
+      renderAttachRow();
+    };
+  });
 }
 
 function renderMessages() {
@@ -485,7 +790,7 @@ function renderMessages() {
   }
   thread.innerHTML = state.messages.map((m) =>
     m.role === 'user'
-      ? `<div class="msg-row user"><div class="msg-user">${esc(m.content)}</div></div>`
+      ? `<div class="msg-row user"><div class="msg-user">${renderUserContent(m.content)}</div></div>`
       : `<div class="msg-row"><div class="msg-assistant"><div class="avatar">AI</div><div class="content">${renderMarkdown(m.content)}${
           m.model ? `<div class="msg-model">${esc(m.model)}</div>` : ''
         }</div></div></div>`
@@ -662,15 +967,26 @@ function appendStreamingRow() {
 async function sendMessage() {
   if (state.streaming) return;
   const input = document.getElementById('input');
-  const text = input.value.trim();
-  if (!text) return;
+  let text = input.value.trim();
+  if (!text && state.attachments.length === 0) return;
+
+  // 添付を本文に組み込む(画像はmarkdown参照、テキストはコードブロック)
+  for (const a of state.attachments) {
+    if (a.kind === 'image') text += `\n\n![${a.name}](${a.url})`;
+    else text += `\n\n【添付ファイル: ${a.name}】\n\`\`\`\n${a.content}\n\`\`\``;
+  }
+  text = text.trim();
 
   // 会話作成の await 中も二重送信を防ぐため、ここで即座にロックする
   state.streaming = true;
   try {
     if (!state.currentConvId) {
-      const { id } = await api('/api/conversations', { method: 'POST' });
+      const { id } = await api('/api/conversations', {
+        method: 'POST',
+        body: state.pendingProjectId ? { project_id: state.pendingProjectId } : {},
+      });
       state.currentConvId = id;
+      state.pendingProjectId = null;
     }
   } catch (err) {
     state.streaming = false;
@@ -680,6 +996,8 @@ async function sendMessage() {
 
   input.value = '';
   input.style.height = 'auto';
+  state.attachments = [];
+  renderAttachRow();
   state.messages.push({ role: 'user', content: text });
   renderMessages();
   await executeChat(text, false);
@@ -1108,7 +1426,7 @@ function renderDepts(el, d) {
     <div class="panel">
       <h3>部署と予算</h3>
       <p class="desc">予算(円/月)は、1ヶ月30日を3日ごと10期間に分けて少しずつ解放するペース配分方式で使われます。利用者には総額を見せず、期間の進み具合だけを表示しています。</p>
-      <p class="desc">各期間の枠を使い切るとチャットはロックされ、利用者自身が「リセット」(今期だけ続行)や「前倒し」(月3回まで)で対応できます。「ロック解除」を押すと今月分は無条件で解除されます。</p>
+      <p class="desc">各期間の枠を使い切るとチャットはロックされ、利用者自身が「前倒し」(次の期間の枠を先取り、月3回まで)で対応できます。「ロック解除」を押すと今月分は無条件で解除されます。</p>
       <p class="desc">部署の利用額は、その部署に所属する全ユーザーの利用額の合計です(ユーザータブで内訳を確認できます)。</p>
       <table class="data">
         <tr><th>部署名</th><th class="num">今月の利用額</th><th class="num">予算(円/月)</th><th>今期</th><th>状態</th><th></th></tr>
@@ -1119,7 +1437,6 @@ function renderDepts(el, d) {
           <td>${dp.period_number}/${dp.period_total}期(前倒し${dp.advance_used}/3)</td>
           <td>${dp.locked ? '<span class="pill locked">🔒 ロック中</span>'
             : dp.unlocked_by_admin && dp.over_budget ? '<span class="pill unlocked">解除中(今月)</span>'
-            : dp.self_unlocked ? '<span class="pill unlocked">本人リセット中</span>'
             : '<span class="pill ok">利用可</span>'}</td>
           <td>
             <button class="btn-ghost" data-save="${dp.id}">保存</button>
