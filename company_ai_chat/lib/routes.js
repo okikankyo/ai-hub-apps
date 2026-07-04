@@ -626,6 +626,12 @@ async function handleChat(req, res, user) {
   } else {
     route = await openai.routeMessage(text);
   }
+  // 画像添付があるメッセージは、ルーターの誤判定で「画像生成」に回されると
+  // 添付した写真が一切見られないまま無関係な新規画像が生成されてしまうため、
+  // 必ずチャット(高性能モデルによる画像読み取り)に倒す
+  if (route.category === 'image' && /\/api\/files\/[a-f0-9]{16,32}\.(?:png|jpe?g|webp|gif)/.test(text)) {
+    route = { category: 'heavy', model: openai.HEAVY_MODEL, promptTokens: route.promptTokens, completionTokens: route.completionTokens };
+  }
   if (route.promptTokens || route.completionTokens) {
     const cost = openai.costJpy(openai.CLASSIFIER_MODEL, route.promptTokens, route.completionTokens);
     db.prepare(`

@@ -660,12 +660,12 @@ function renderChat() {
           <option value="light">⚡ 軽量</option>
           <option value="heavy">🧠 高性能</option>
         </select>
-        <textarea id="input" rows="1" placeholder="メッセージを入力…(Shift+Enterで改行)"></textarea>
+        <textarea id="input" rows="1" placeholder="メッセージを入力…(Shift+Enterで送信)"></textarea>
         <button class="send" id="send" title="送信">↑</button>
       </div>
       <input type="file" id="file-input" multiple style="display:none"
         accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.tsv,.json,.log">
-      <div class="composer-note">「自動」では内容に応じて最適なモデルに振り分けます。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
+      <div class="composer-note">Shift+Enterで送信、クリックでも送信できます(Enterのみでは改行されます)。「自動」では内容に応じて最適なモデルに振り分けます。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
     </div>`}
   `;
 
@@ -701,8 +701,9 @@ function renderChat() {
     input.style.height = Math.min(input.scrollHeight, 180) + 'px';
   };
   input.addEventListener('input', autosize);
+  // Enterのみは改行(IME確定時の誤送信を避けるため)、Shift+Enterで送信する
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (e.key === 'Enter' && e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendMessage();
     }
