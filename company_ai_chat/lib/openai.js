@@ -149,12 +149,26 @@ function pickImageSize(prompt) {
   return '1024x1024';
 }
 
+// dall-e-3はプロンプト4000文字までだが、gpt-image-1はもっと長く受け付けられる。
+// 超過時は「直近の合意内容」を残すため末尾側を優先して切り詰める(先頭切り詰めだと
+// 会話の最後に決まった具体的な要件が消えてしまう)。
+function truncatePrompt(prompt) {
+  const limit = /dall-e-3/i.test(IMAGE_MODEL) ? 4000 : 32000;
+  return prompt.length > limit ? prompt.slice(-limit) : prompt;
+}
+
 async function generateImage(prompt) {
   if (MOCK) return mockImage(prompt);
+  // 会話の書き起こしをそのまま渡すと、画像生成モデルが雑談部分を絵に描こうとしたり
+  // 要件を読み違えたりするため、「会話の最終合意内容を1枚の画像にする」ことを明示する
+  const finalPrompt =
+    '以下はユーザーとアシスタントが画像の内容を相談した会話です。会話全体を踏まえて、' +
+    '最後に合意された内容の画像を1枚生成してください。会話文自体を画像内の文字として描画しないでください。\n\n' +
+    truncatePrompt(prompt);
   const res = await fetch(`${API_BASE}/images/generations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-    body: JSON.stringify({ model: IMAGE_MODEL, prompt: prompt.slice(0, 4000), size: pickImageSize(prompt) }),
+    body: JSON.stringify({ model: IMAGE_MODEL, prompt: finalPrompt, size: pickImageSize(prompt) }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
