@@ -7,6 +7,7 @@ const path = require('node:path');
 const { db, hashPassword, currentMonth, DEFAULT_TEMPLATES } = require('./db');
 const auth = require('./auth');
 const openai = require('./openai');
+const pop = require('./pop');
 const google = require('./google_auth');
 const mailer = require('./mailer');
 
@@ -566,6 +567,47 @@ async function handle(req, res, method, pathname, url) {
     const file = `${crypto.randomBytes(12).toString('hex')}.${ext === 'jpeg' ? 'jpg' : ext}`;
     await fs.promises.writeFile(path.join(openai.IMAGES_DIR, file), buf);
     return json(res, 200, { url: `/api/files/${file}` });
+  }
+
+  // POP作成ツール(AI不使用): アップロード済みの実写真+見出し+価格をそのまま合成する。
+  // AI生成と違い常に同じ結果になり、価格や商品が変わってしまうことがない。
+  if (method === 'POST' && pathname === '/api/pop') {
+    const body = await readBody(req);
+    const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
+      .get(Number(body.conversation_id), user.id);
+    if (!conv) return json(res, 404, { error: '会話が見つかりません' });
+
+    const photoMatch = String(body.photo_url || '').match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|jpe?g|webp|gif))$/);
+    if (!photoMatch) return json(res, 400, { error: '商品写真をアップロードしてください' });
+    let photoBuffer;
+    try {
+      photoBuffer = await fs.promises.readFile(path.join(openai.IMAGES_DIR, photoMatch[1]));
+    } catch {
+      return json(res, 400, { error: '写真の読み込みに失敗しました。もう一度アップロードしてください' });
+    }
+    const photoExt = photoMatch[1].split('.').pop();
+    const photoMime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }[photoExt];
+
+    const headline = String(body.headline || '').trim().slice(0, 20);
+    const price = String(body.price || '').trim().slice(0, 20);
+    if (!headline || !price) return json(res, 400, { error: '見出しと価格を入力してください' });
+    const color = pop.COLORS.includes(body.color) ? body.color : 'pink';
+    const aspect = pop.ASPECTS.includes(body.aspect) ? body.aspect : 'square';
+
+    const svg = pop.buildPopSvg({ photoBuffer, photoMime, headline, price, color, aspect });
+    const file = `${crypto.randomBytes(12).toString('hex')}.svg`;
+    await fs.promises.writeFile(path.join(openai.IMAGES_DIR, file), svg);
+
+    db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
+      .run(conv.id, 'user', `POP作成: 見出し「${headline}」/ 価格「${price}」`);
+    const msgCount = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id).n;
+    if (msgCount === 1) {
+      db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(`POP: ${headline}`.slice(0, 30), conv.id);
+    }
+    db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
+      .run(conv.id, 'assistant', `![POP](/api/files/${file})`, 'pop-tool');
+    db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
+    return json(res, 200, { ok: true, url: `/api/files/${file}` });
   }
 
   // 生成画像・添付画像の配信(ログイン必須、ファイル名はランダムhexのみ許可)

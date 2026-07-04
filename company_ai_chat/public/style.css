@@ -296,6 +296,29 @@ input, select, textarea { font: inherit; }
 .attach-chip button:hover { color: var(--critical); }
 .attach-image { max-width: min(260px, 100%); border-radius: 10px; display: block; margin-top: 6px; }
 
+/* POP作成ツール(モーダル) */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(11,11,11,0.45); z-index: 150;
+  align-items: center; justify-content: center; padding: 20px;
+}
+.modal-overlay.show { display: flex; }
+.modal-card {
+  background: var(--surface); border-radius: 16px; padding: 24px; width: 100%; max-width: 420px;
+  max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+}
+.modal-card h3 { margin: 0 0 4px; }
+.modal-card label { display: block; font-size: 12.5px; color: var(--ink-2); margin: 14px 0 4px; }
+.modal-card input[type="text"], .modal-card input[type="file"], .modal-card select {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--grid); border-radius: 8px; font: inherit; box-sizing: border-box;
+}
+#pop-preview img { max-width: 100%; max-height: 140px; border-radius: 10px; margin-top: 8px; display: block; }
+.pop-colors { display: flex; gap: 8px; }
+.pop-color-btn {
+  width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0;
+}
+.pop-color-btn.active { border-color: var(--ink); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+
 /* ロックオーバーレイ */
 .lock-overlay {
   max-width: 560px; margin: 14vh auto 0; text-align: center; background: var(--surface);

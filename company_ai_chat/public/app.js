@@ -315,7 +315,8 @@ function render() {
       <main class="main" id="main"></main>
     </div>
     <div class="chart-tooltip" id="chart-tooltip"></div>
-    <div class="ctx-menu" id="ctx-menu"></div>`;
+    <div class="ctx-menu" id="ctx-menu"></div>
+    <div class="modal-overlay" id="pop-modal"></div>`;
 
   document.getElementById('sidebar-backdrop').onclick = closeMobileSidebar;
 
@@ -650,6 +651,7 @@ function renderChat() {
       <div class="attach-row" id="attach-row"></div>
       <div class="composer">
         <button class="attach-btn" id="attach-btn" title="ファイルを添付">📎</button>
+        <button class="attach-btn" id="pop-btn" title="POP作成ツール(AIを使わず写真+文字で確実に作る)">🏷️</button>
         <select id="model-pref" class="model-pref" title="使用モデル">
           <option value="light">⚡ 軽量</option>
           <option value="heavy">🧠 高性能</option>
@@ -717,7 +719,111 @@ function renderChat() {
   };
   renderAttachRow();
 
+  document.getElementById('pop-btn').onclick = openPopModal;
+
   input.focus();
+}
+
+// ---------- POP作成ツール(AI不使用、写真+文字を確実に合成) ----------
+
+const POP_COLORS = [
+  { id: 'pink', label: 'ピンク', swatch: '#e83e8c' },
+  { id: 'yellow', label: 'イエロー', swatch: '#d9822b' },
+  { id: 'blue', label: 'ブルー', swatch: '#2563eb' },
+  { id: 'green', label: 'グリーン', swatch: '#16a34a' },
+  { id: 'purple', label: 'パープル', swatch: '#7c3aed' },
+];
+const popState = { photoFile: null, color: 'pink', aspect: 'square' };
+
+function openPopModal() {
+  popState.photoFile = null;
+  const modal = document.getElementById('pop-modal');
+  modal.innerHTML = `
+    <div class="modal-card">
+      <h3>🏷️ POP作成ツール</h3>
+      <p class="desc">AIを使わず、実際の商品写真にそのまま見出しと価格を重ねます。写真も価格も変わりません。</p>
+      <label>商品写真</label>
+      <input type="file" id="pop-photo" accept="image/png,image/jpeg,image/webp,image/gif">
+      <div id="pop-preview"></div>
+      <label>見出し(例: 夏限定セール)</label>
+      <input type="text" id="pop-headline" maxlength="20" placeholder="夏限定セール">
+      <label>価格(例: 2980円)</label>
+      <input type="text" id="pop-price" maxlength="20" placeholder="2980円">
+      <label>色</label>
+      <div class="pop-colors">
+        ${POP_COLORS.map((c) => `<button type="button" class="pop-color-btn ${c.id === popState.color ? 'active' : ''}"
+          data-color="${c.id}" style="background:${c.swatch}" title="${c.label}"></button>`).join('')}
+      </div>
+      <label>縦横比</label>
+      <select id="pop-aspect">
+        <option value="square">正方形</option>
+        <option value="landscape">横長(名刺サイズ風)</option>
+        <option value="portrait">縦長</option>
+      </select>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="pop-cancel">キャンセル</button>
+        <button class="btn-primary" id="pop-submit">作成する</button>
+      </div>
+      <div class="login-error" id="pop-error"></div>
+    </div>`;
+  modal.classList.add('show');
+  document.getElementById('pop-aspect').value = popState.aspect;
+
+  document.getElementById('pop-photo').onchange = (e) => {
+    popState.photoFile = e.target.files[0] || null;
+    const preview = document.getElementById('pop-preview');
+    preview.innerHTML = popState.photoFile
+      ? `<img src="${URL.createObjectURL(popState.photoFile)}" alt="">` : '';
+  };
+  modal.querySelectorAll('.pop-color-btn').forEach((btn) => {
+    btn.onclick = () => {
+      popState.color = btn.dataset.color;
+      modal.querySelectorAll('.pop-color-btn').forEach((b) => b.classList.toggle('active', b === btn));
+    };
+  });
+  document.getElementById('pop-cancel').onclick = closePopModal;
+  modal.onclick = (e) => { if (e.target === modal) closePopModal(); };
+  document.getElementById('pop-submit').onclick = submitPop;
+}
+
+function closePopModal() {
+  const modal = document.getElementById('pop-modal');
+  modal.classList.remove('show');
+  modal.innerHTML = '';
+}
+
+async function submitPop() {
+  const headline = document.getElementById('pop-headline').value.trim();
+  const price = document.getElementById('pop-price').value.trim();
+  const aspect = document.getElementById('pop-aspect').value;
+  const errorEl = document.getElementById('pop-error');
+  errorEl.textContent = '';
+  if (!popState.photoFile) return (errorEl.textContent = '商品写真を選択してください');
+  if (!headline || !price) return (errorEl.textContent = '見出しと価格を入力してください');
+
+  const submitBtn = document.getElementById('pop-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '作成中…';
+  try {
+    const data = await fileToBase64(popState.photoFile);
+    const { url } = await api('/api/upload', { method: 'POST', body: { name: popState.photoFile.name, data } });
+    if (!state.currentConvId) {
+      const { id } = await api('/api/conversations', { method: 'POST' });
+      state.currentConvId = id;
+    }
+    await api('/api/pop', {
+      method: 'POST',
+      body: { conversation_id: state.currentConvId, photo_url: url, headline, price, color: popState.color, aspect },
+    });
+    closePopModal();
+    state.messages = await api(`/api/conversations/${state.currentConvId}/messages`);
+    await loadConversations();
+    render();
+  } catch (err) {
+    errorEl.textContent = err.message;
+    submitBtn.disabled = false;
+    submitBtn.textContent = '作成する';
+  }
 }
 
 // ---------- 添付ファイル ----------
