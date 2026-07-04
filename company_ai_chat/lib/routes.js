@@ -8,6 +8,7 @@ const { db, hashPassword, currentMonth, DEFAULT_TEMPLATES } = require('./db');
 const auth = require('./auth');
 const openai = require('./openai');
 const pop = require('./pop');
+const docs = require('./docs');
 const google = require('./google_auth');
 const mailer = require('./mailer');
 
@@ -569,41 +570,100 @@ async function handle(req, res, method, pathname, url) {
     return json(res, 200, { url: `/api/files/${file}` });
   }
 
-  // POP作成ツール(AI不使用): アップロード済みの実写真+見出し+価格をそのまま合成する。
-  // AI生成と違い常に同じ結果になり、価格や商品が変わってしまうことがない。
+  // PDF・Word・Excelの添付ファイルからテキストを抽出する(base64 JSON、8MBまで)
+  if (method === 'POST' && pathname === '/api/extract-text') {
+    let body;
+    try {
+      body = await readBody(req, 12_000_000);
+    } catch {
+      return json(res, 400, { error: 'ファイルが大きすぎます(8MBまで)' });
+    }
+    if (!docs.DOC_EXT_RE.test(String(body.name || ''))) {
+      return json(res, 400, { error: '対応していない形式です(pdf / docx / xlsx / xls)' });
+    }
+    const buf = Buffer.from(String(body.data || ''), 'base64');
+    if (buf.length === 0) return json(res, 400, { error: 'ファイルの読み込みに失敗しました' });
+    if (buf.length > 8_000_000) return json(res, 400, { error: 'ファイルサイズは8MBまでです' });
+    try {
+      const text = await docs.extractDocText(body.name, buf);
+      return json(res, 200, { text });
+    } catch (err) {
+      console.error('[extract-text]', err.message);
+      return json(res, 400, { error: 'ファイルの読み込みに失敗しました。内容を確認してください' });
+    }
+  }
+
+  // 商品写真をAIで切り抜き・明るさ補正する時の指示文(商品自体は変えない)
+  const POP_ENHANCE_PROMPT =
+    '商品の背景を白く綺麗に切り抜いて、明るく鮮明に補正してください。' +
+    '商品自体の形・色・デザインは変えないでください。文字は追加しないでください。';
+
+  // POP作成ツール: 見出し・価格は必ずSVGで確実に合成する(価格が消えたり変わったりしない)。
+  // 元になる商品画像は「写真から」(AIで切り抜き・明るさ補正)か「新規作成」(AIで一から生成)を選べる。
   if (method === 'POST' && pathname === '/api/pop') {
     const body = await readBody(req);
     const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
       .get(Number(body.conversation_id), user.id);
     if (!conv) return json(res, 404, { error: '会話が見つかりません' });
 
-    const photoMatch = String(body.photo_url || '').match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|jpe?g|webp|gif))$/);
-    if (!photoMatch) return json(res, 400, { error: '商品写真をアップロードしてください' });
-    let photoBuffer;
-    try {
-      photoBuffer = await fs.promises.readFile(path.join(openai.IMAGES_DIR, photoMatch[1]));
-    } catch {
-      return json(res, 400, { error: '写真の読み込みに失敗しました。もう一度アップロードしてください' });
-    }
-    const photoExt = photoMatch[1].split('.').pop();
-    const photoMime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }[photoExt];
-
     const headline = String(body.headline || '').trim().slice(0, 20);
     const price = String(body.price || '').trim().slice(0, 20);
     if (!headline || !price) return json(res, 400, { error: '見出しと価格を入力してください' });
     const color = pop.COLORS.includes(body.color) ? body.color : 'pink';
     const aspect = pop.ASPECTS.includes(body.aspect) ? body.aspect : 'square';
+    const mode = body.mode === 'generate' ? 'generate' : 'photo';
 
-    const svg = pop.buildPopSvg({ photoBuffer, photoMime, headline, price, color, aspect });
+    // 写真の加工・新規生成はAI利用のためコストが発生する。予算ロック中は実行しない。
+    const dept = getUserDept(user);
+    if (!dept) return json(res, 400, { error: '部署が設定されていません。管理者に連絡してください。' });
+    if (dept.locked) {
+      return json(res, 403, {
+        error: `部署「${dept.name}」の今期の利用枠を使い切りました。次の期間までお待ちいただくか、「前倒しで使う」ボタンをご利用ください。`,
+        locked: true,
+      });
+    }
+
+    const FILE_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml' };
+    let result;
+    try {
+      if (mode === 'photo') {
+        const photoMatch = String(body.photo_url || '').match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|jpe?g|webp|gif))$/);
+        if (!photoMatch) return json(res, 400, { error: '商品写真をアップロードしてください' });
+        let photoBuffer;
+        try {
+          photoBuffer = await fs.promises.readFile(path.join(openai.IMAGES_DIR, photoMatch[1]));
+        } catch {
+          return json(res, 400, { error: '写真の読み込みに失敗しました。もう一度アップロードしてください' });
+        }
+        const photoMime = FILE_MIME[photoMatch[1].split('.').pop()];
+        result = await openai.editImage(POP_ENHANCE_PROMPT, [{ buffer: photoBuffer, mime: photoMime, name: photoMatch[1] }]);
+      } else {
+        const description = String(body.description || '').trim().slice(0, 500);
+        if (!description) return json(res, 400, { error: '作りたい商品の説明を入力してください' });
+        result = await openai.generateImage(description);
+      }
+    } catch (err) {
+      console.error('[pop]', err);
+      return json(res, 400, { error: '画像の作成に失敗しました。時間をおいて再度お試しください' });
+    }
+    const productBuffer = await fs.promises.readFile(path.join(openai.IMAGES_DIR, result.file));
+    const productMime = FILE_MIME[result.file.split('.').pop()];
+    const { model: aiModel, costJpy: aiCostJpy } = result;
+
+    const svg = pop.buildPopSvg({ photoBuffer: productBuffer, photoMime: productMime, headline, price, color, aspect });
     const file = `${crypto.randomBytes(12).toString('hex')}.svg`;
     await fs.promises.writeFile(path.join(openai.IMAGES_DIR, file), svg);
 
     db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
-      .run(conv.id, 'user', `POP作成: 見出し「${headline}」/ 価格「${price}」`);
+      .run(conv.id, 'user', `POP作成(${mode === 'photo' ? '写真から' : '新規作成'}): 見出し「${headline}」/ 価格「${price}」`);
     const msgCount = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id).n;
     if (msgCount === 1) {
       db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(`POP: ${headline}`.slice(0, 30), conv.id);
     }
+    db.prepare(`
+      INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
+      VALUES (?, ?, ?, 'chat', 0, 0, ?)
+    `).run(user.id, user.department_id, aiModel, aiCostJpy);
     db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
       .run(conv.id, 'assistant', `![POP](/api/files/${file})`, 'pop-tool');
     db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);

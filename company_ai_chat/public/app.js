@@ -661,7 +661,7 @@ function renderChat() {
         <button class="send" id="send" title="送信">↑</button>
       </div>
       <input type="file" id="file-input" multiple style="display:none"
-        accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.tsv,.json,.log">
+        accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.tsv,.json,.log,.pdf,.docx,.xlsx,.xls">
       <div class="composer-note">Shift+Enterで送信、クリックでも送信できます(Enterのみでは改行されます)。通常は「軽量」のままでOKです。精密な画像の確認や複雑な内容は「高性能」を、画像を作りたいときは「画像生成」を選んでください。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
     </div>`}
   `;
@@ -733,18 +733,33 @@ const POP_COLORS = [
   { id: 'green', label: 'グリーン', swatch: '#16a34a' },
   { id: 'purple', label: 'パープル', swatch: '#7c3aed' },
 ];
-const popState = { photoFile: null, color: 'pink', aspect: 'square' };
+const popState = { mode: 'photo', photoFile: null, color: 'pink', aspect: 'square' };
 
 function openPopModal() {
   popState.photoFile = null;
   const modal = document.getElementById('pop-modal');
+  renderPopModal(modal);
+  modal.classList.add('show');
+  modal.onclick = (e) => { if (e.target === modal) closePopModal(); };
+}
+
+function renderPopModal(modal) {
   modal.innerHTML = `
     <div class="modal-card">
       <h3>🏷️ POP作成ツール</h3>
-      <p class="desc">AIを使わず、実際の商品写真にそのまま見出しと価格を重ねます。写真も価格も変わりません。</p>
+      <p class="desc">見出しと価格は必ずそのまま合成されるので、文字が崩れたり変わったりしません。</p>
+      <div class="pop-mode-tabs">
+        <button type="button" class="pop-mode-tab ${popState.mode === 'photo' ? 'active' : ''}" data-mode="photo">📷 写真から作成</button>
+        <button type="button" class="pop-mode-tab ${popState.mode === 'generate' ? 'active' : ''}" data-mode="generate">✨ 新規作成</button>
+      </div>
+      ${popState.mode === 'photo' ? `
+      <p class="desc">AIが商品写真を切り抜き・明るさ補正します(商品自体は変えません)。</p>
       <label>商品写真</label>
       <input type="file" id="pop-photo" accept="image/png,image/jpeg,image/webp,image/gif">
-      <div id="pop-preview"></div>
+      <div id="pop-preview"></div>` : `
+      <p class="desc">AIが説明文から商品画像を新しく作ります。</p>
+      <label>作りたい商品の説明</label>
+      <textarea id="pop-description" rows="2" maxlength="500" placeholder="例: 青いラピスラズリを使ったゴールドのブレスレット"></textarea>`}
       <label>見出し(例: 夏限定セール)</label>
       <input type="text" id="pop-headline" maxlength="20" placeholder="夏限定セール">
       <label>価格(例: 2980円)</label>
@@ -766,15 +781,20 @@ function openPopModal() {
       </div>
       <div class="login-error" id="pop-error"></div>
     </div>`;
-  modal.classList.add('show');
   document.getElementById('pop-aspect').value = popState.aspect;
 
-  document.getElementById('pop-photo').onchange = (e) => {
-    popState.photoFile = e.target.files[0] || null;
-    const preview = document.getElementById('pop-preview');
-    preview.innerHTML = popState.photoFile
-      ? `<img src="${URL.createObjectURL(popState.photoFile)}" alt="">` : '';
-  };
+  modal.querySelectorAll('.pop-mode-tab').forEach((btn) => {
+    btn.onclick = () => { popState.mode = btn.dataset.mode; renderPopModal(modal); };
+  });
+  const photoInput = document.getElementById('pop-photo');
+  if (photoInput) {
+    photoInput.onchange = (e) => {
+      popState.photoFile = e.target.files[0] || null;
+      const preview = document.getElementById('pop-preview');
+      preview.innerHTML = popState.photoFile
+        ? `<img src="${URL.createObjectURL(popState.photoFile)}" alt="">` : '';
+    };
+  }
   modal.querySelectorAll('.pop-color-btn').forEach((btn) => {
     btn.onclick = () => {
       popState.color = btn.dataset.color;
@@ -782,7 +802,6 @@ function openPopModal() {
     };
   });
   document.getElementById('pop-cancel').onclick = closePopModal;
-  modal.onclick = (e) => { if (e.target === modal) closePopModal(); };
   document.getElementById('pop-submit').onclick = submitPop;
 }
 
@@ -798,26 +817,33 @@ async function submitPop() {
   const aspect = document.getElementById('pop-aspect').value;
   const errorEl = document.getElementById('pop-error');
   errorEl.textContent = '';
-  if (!popState.photoFile) return (errorEl.textContent = '商品写真を選択してください');
+  const description = popState.mode === 'generate' ? document.getElementById('pop-description').value.trim() : '';
+  if (popState.mode === 'photo' && !popState.photoFile) return (errorEl.textContent = '商品写真を選択してください');
+  if (popState.mode === 'generate' && !description) return (errorEl.textContent = '作りたい商品の説明を入力してください');
   if (!headline || !price) return (errorEl.textContent = '見出しと価格を入力してください');
 
   const submitBtn = document.getElementById('pop-submit');
   submitBtn.disabled = true;
   submitBtn.textContent = '作成中…';
   try {
-    const data = await fileToBase64(popState.photoFile);
-    const { url } = await api('/api/upload', { method: 'POST', body: { name: popState.photoFile.name, data } });
+    const body = { conversation_id: state.currentConvId, mode: popState.mode, headline, price, color: popState.color, aspect };
+    if (popState.mode === 'photo') {
+      const data = await fileToBase64(popState.photoFile);
+      const { url } = await api('/api/upload', { method: 'POST', body: { name: popState.photoFile.name, data } });
+      body.photo_url = url;
+    } else {
+      body.description = description;
+    }
     if (!state.currentConvId) {
       const { id } = await api('/api/conversations', { method: 'POST' });
       state.currentConvId = id;
+      body.conversation_id = id;
     }
-    await api('/api/pop', {
-      method: 'POST',
-      body: { conversation_id: state.currentConvId, photo_url: url, headline, price, color: popState.color, aspect },
-    });
+    await api('/api/pop', { method: 'POST', body });
     closePopModal();
     state.messages = await api(`/api/conversations/${state.currentConvId}/messages`);
     await loadConversations();
+    await loadMe();
     render();
   } catch (err) {
     errorEl.textContent = err.message;
@@ -829,6 +855,7 @@ async function submitPop() {
 // ---------- 添付ファイル ----------
 
 const TEXT_FILE_RE = /\.(txt|md|csv|tsv|json|log)$/i;
+const DOC_FILE_RE = /\.(pdf|docx|xlsx|xls)$/i;
 
 async function addAttachment(file) {
   if (state.attachments.length >= 4) return alert('添付は一度に4件までです');
@@ -845,8 +872,17 @@ async function addAttachment(file) {
   } else if (TEXT_FILE_RE.test(file.name)) {
     if (file.size > 200_000) return alert(`${file.name}: テキストファイルは200KBまでです`);
     state.attachments.push({ kind: 'text', name: file.name, content: await file.text() });
+  } else if (DOC_FILE_RE.test(file.name)) {
+    if (file.size > 8_000_000) return alert(`${file.name}: ファイルは8MBまでです`);
+    try {
+      const data = await fileToBase64(file);
+      const { text } = await api('/api/extract-text', { method: 'POST', body: { name: file.name, data } });
+      state.attachments.push({ kind: 'text', name: file.name, content: text });
+    } catch (err) {
+      return alert(`${file.name}: ${err.message}`);
+    }
   } else {
-    return alert(`${file.name}: 対応していない形式です(画像 / txt / md / csv / json など)`);
+    return alert(`${file.name}: 対応していない形式です(画像 / txt / md / csv / pdf / docx / xlsx など)`);
   }
   renderAttachRow();
 }

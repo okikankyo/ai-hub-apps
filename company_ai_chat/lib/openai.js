@@ -313,6 +313,6 @@ function mockClassify(text) {
 }
 
 module.exports = {
-  streamChat, classify, costJpy, estimateTokens, createImage,
+  streamChat, classify, costJpy, estimateTokens, createImage, generateImage, editImage,
   CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
 };
