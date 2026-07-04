@@ -685,12 +685,8 @@ async function handleChat(req, res, user) {
     // 画像生成(ストリーミングなし)
     try {
       send('delta', { text: '🎨 画像を生成しています…' });
-      // 縦横比・テイストなどの要件は直前のやり取りで詰めていることが多いため、
-      // 直近の会話全体をプロンプトに含める(最後の一言だけだと要件が失われる)
-      const imagePrompt = history.slice(-8)
-        .map((m) => `${m.role === 'user' ? 'ユーザー' : 'アシスタント'}: ${m.content}`)
-        .join('\n');
-      const img = await openai.generateImage(imagePrompt);
+      // 入力されたテキストをそのままプロンプトとしてAPIに渡す
+      const img = await openai.generateImage(text);
       const content = `![生成画像](/api/files/${img.file})`;
       const cost = saveAssistant(content, img.model, 0, 0, img.costJpy);
       send('replace', { text: content });
