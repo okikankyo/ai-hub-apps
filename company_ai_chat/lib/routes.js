@@ -716,14 +716,14 @@ async function handleChat(req, res, user) {
     });
   }
 
-  // モデル・画像生成はユーザーが手動で選択する(自動判定は行わない)
+  // テキスト相談はGPT-5.6 Lunaに固定する。クライアントからモデル名を
+  // 受け取っても採用しないため、画面改変や古いクライアント経由で別モデルに
+  // 切り替わることを防ぐ。画像生成だけは既存の専用モデルを使う。
   let route;
-  if (model_pref === 'heavy') {
-    route = { category: 'heavy', model: openai.HEAVY_MODEL };
-  } else if (model_pref === 'image') {
+  if (model_pref === 'image') {
     route = { category: 'image', model: openai.IMAGE_MODEL };
   } else {
-    route = { category: 'light', model: openai.LIGHT_MODEL };
+    route = { category: 'chat', model: openai.LUNA_MODEL };
   }
 
   // ユーザー発言を保存し、初回ならタイトルに反映

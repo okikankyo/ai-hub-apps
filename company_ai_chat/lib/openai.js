@@ -10,6 +10,8 @@ const { DATA_DIR } = require('./db');
 const API_KEY = process.env.OPENAI_API_KEY || '';
 const API_BASE = process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
 const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL || 'gpt-4o-mini';
+// テキスト相談で使うモデル。GPT-5.6 Lunaを固定し、画面からのモデル選択に依存しない。
+const LUNA_MODEL = process.env.LUNA_MODEL || 'gpt-5.6-luna';
 const USD_JPY = Number(process.env.USD_JPY || 150);
 const MOCK = !API_KEY;
 
@@ -24,6 +26,7 @@ fs.mkdirSync(IMAGES_DIR, { recursive: true });
 
 // USD / 100万トークン。必要に応じて追記する。
 const PRICING = {
+  'gpt-5.6-luna': { input: 1, output: 6 },
   'gpt-5':         { input: 1.25, output: 10 },
   'gpt-5-mini':    { input: 0.25, output: 2 },
   'gpt-5-nano':    { input: 0.05, output: 0.4 },
@@ -314,5 +317,5 @@ function mockClassify(text) {
 
 module.exports = {
   streamChat, classify, costJpy, estimateTokens, createImage, generateImage, editImage,
-  CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
+  CLASSIFIER_MODEL, LUNA_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
 };

@@ -1,6 +1,6 @@
 # 引き継ぎ書 — 社内AIチャット (company_ai_chat)
 
-最終更新: 2026-07-04
+最終更新: 2026-07-10
 
 このドキュメントは、開発を別の担当者/AIエージェント(Codex 等)に引き継ぐための
 現状まとめです。**README.md は一部が古い**ので、最新の挙動はこちらを正としてください
@@ -118,15 +118,14 @@ node server.js            # http://localhost:8787
 
 ## 7. 主要機能の現在の挙動(重要)
 
-### モデル選択(★READMEと違う)
-以前は「内容から自動でlight/heavy/image/sensitiveを振り分けるルーター」があったが、
-**誤判定が多く実用に耐えないため廃止した。** 現在はユーザーが手動で選ぶ:
-- `⚡軽量`(既定、`LIGHT_MODEL`=既定 gpt-5-mini)
-- `🧠高性能`(`HEAVY_MODEL`=既定 gpt-5)
-- `🎨画像生成`(`IMAGE_MODEL`=既定 gpt-image-1)
+### モデル選択
+テキスト相談は `gpt-5.6-luna` に固定している。クライアントから `model_pref` を受け取っても、
+サーバー側でLunaを選ぶため、古い画面や直接API呼び出しで別のテキストモデルへ切り替わらない。
+画像生成だけは `model_pref=image` のとき `IMAGE_MODEL` を使う。
 
-`model_pref` で `light`/`heavy`/`image` を送る。**sensitiveの実行前確認ダイアログも廃止済み**
-(チャット開始画面に「自動確認は行われない」旨の注意書きを表示)。
+`LUNA_MODEL` の既定値は `gpt-5.6-luna`。GPT-5.6 Lunaは限定プレビューなので、
+OpenAI側で利用許可された組織のAPIキーが必要。
+
 ※業務/私的の分類(`CLASSIFIER_MODEL`)は応答とは別に非同期で今も動いている(ラベルのみ保存)。
 
 ### 予算(★READMEと違う。3日ごとのペース配分方式)
@@ -179,7 +178,16 @@ AI画像生成は「正確な価格・文字」が苦手なので、**役割分�
 
 ## 9. 環境変数(名前のみ。値は各自設定。`.env.example` 参照)
 
-`OPENAI_API_KEY` / `LIGHT_MODEL`(または `ROUTER_LIGHT_MODEL`)/ `HEAVY_MODEL`(または `ROUTER_HEAVY_MODEL`)/ `IMAGE_MODEL` / `IMAGE_COST_JPY` / `CLASSIFIER_MODEL` / `USD_JPY` / `PRIVATE_RATIO_WARN` / `PRIVATE_MIN_COUNT` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `BASE_URL`(**リダイレクトURI生成とCookieのSecure判定に使う。httpsで公開するなら必ずhttpsで設定**)/ `SMTP_USER` / `SMTP_PASS`(Gmailアプリパスワード)/ `PORT` / `DATA_DIR` / `SYSTEM_PROMPT`
+`OPENAI_API_KEY` / `LUNA_MODEL` / `IMAGE_MODEL` / `IMAGE_COST_JPY` / `CLASSIFIER_MODEL` / `USD_JPY` / `PRIVATE_RATIO_WARN` / `PRIVATE_MIN_COUNT` / `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `BASE_URL`(**リダイレクトURI生成とCookieのSecure判定に使う。httpsで公開するなら必ずhttpsで設定**)/ `SMTP_USER` / `SMTP_PASS`(Gmailアプリパスワード)/ `PORT` / `DATA_DIR` / `SYSTEM_PROMPT`
+
+### 2026-07-10 追加: チャット相談をGPT-5.6 Luna固定へ変更
+
+- `lib/openai.js` に `LUNA_MODEL` (既定値 `gpt-5.6-luna`) を追加
+- `lib/routes.js` で、`model_pref` の値に関係なくテキスト相談はLunaを使用
+- `public/app.js` のモデル選択を `GPT-5.6 Luna` と `画像生成` に整理
+- `gpt-5.6-luna` の料金を入力 $1 / 出力 $6 (100万トークンあたり) として登録
+- APIキー未設定時は従来どおりモック。実運用ではCoolifyの環境変数 `OPENAI_API_KEY` にキーを設定する
+- GPT-5.6 Lunaは限定プレビューのため、利用許可済みのOpenAI組織/APIキーが必要
 
 ---
 

@@ -7,7 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const routes = require('./lib/routes');
-const { MOCK, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL } = require('./lib/openai');
+const { MOCK, LUNA_MODEL, IMAGE_MODEL } = require('./lib/openai');
 
 const PORT = Number(process.env.PORT || 8787);
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -64,5 +64,5 @@ server.listen(PORT, () => {
   console.log(`社内AIチャット: http://localhost:${PORT}`);
   console.log(MOCK
     ? '⚠ OPENAI_API_KEY が未設定のためモックモードで起動しました(応答はダミーです)'
-    : `モデル: 軽量=${LIGHT_MODEL} / 高性能=${HEAVY_MODEL} / 画像=${IMAGE_MODEL}`);
+    : `モデル: 相談=${LUNA_MODEL} / 画像=${IMAGE_MODEL}`);
 });

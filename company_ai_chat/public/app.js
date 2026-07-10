@@ -12,7 +12,7 @@ const state = {
   view: 'chat',      // 'chat' | 'admin'
   adminTab: 'dashboard',
   adminData: null,
-  modelPref: 'light',    // 'light' | 'heavy' | 'image'(自動判定は行わずユーザーが選択)
+  modelPref: 'luna',     // テキスト相談はGPT-5.6 Luna固定。画像生成のみ別モード。
   templates: [],         // チャット開始画面のテンプレート一覧(ユーザー個人用)
   templatesExpanded: false,
   templateEditMode: false, // チャット画面内でのテンプレート編集モード
@@ -653,8 +653,7 @@ function renderChat() {
         <button class="attach-btn" id="attach-btn" title="ファイルを添付">📎</button>
         <button class="attach-btn" id="pop-btn" title="POP作成ツール(AIを使わず写真+文字で確実に作る)">🏷️</button>
         <select id="model-pref" class="model-pref" title="使用モデル">
-          <option value="light">⚡ 軽量</option>
-          <option value="heavy">🧠 高性能</option>
+          <option value="luna">GPT-5.6 Luna</option>
           <option value="image">🎨 画像生成</option>
         </select>
         <textarea id="input" rows="1" placeholder="メッセージを入力…(Shift+Enterで送信)"></textarea>
@@ -662,7 +661,7 @@ function renderChat() {
       </div>
       <input type="file" id="file-input" multiple style="display:none"
         accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.tsv,.json,.log,.pdf,.docx,.xlsx,.xls">
-      <div class="composer-note">Shift+Enterで送信、クリックでも送信できます(Enterのみでは改行されます)。通常は「軽量」のままでOKです。精密な画像の確認や複雑な内容は「高性能」を、画像を作りたいときは「画像生成」を選んでください。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
+      <div class="composer-note">Shift+Enterで送信、クリックでも送信できます(Enterのみでは改行されます)。テキスト相談はGPT-5.6 Lunaを使います。画像を作りたいときだけ「画像生成」を選んでください。利用状況の分析のため、各メッセージは業務/私的利用の判定のみ行われます。会話の内容自体が管理者に共有されることはありません。</div>
     </div>`}
   `;
 
