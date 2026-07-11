@@ -1,0 +1,45 @@
+name: 沖縄・暴風警報チェック
+
+on:
+  schedule:
+    # 15分ごと（UTC基準。GitHubのcronは数分遅延することがある）
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}   # 手動実行も可能
+
+# state.json をコミットするため書き込み権限が必要
+permissions:
+  contents: write
+
+# 実行の重なりを防ぐ（stateの競合回避）
+concurrency:
+  group: storm-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 暴風警報をチェックして通知
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          # Slack/Discord/ntfy/raw のいずれか。リポジトリ変数 WEBHOOK_TYPE で切替（既定 slack）
+          WEBHOOK_TYPE: ${{ vars.WEBHOOK_TYPE || 'slack' }}
+        run: python check.py
+
+      - name: 状態を保存（変化があった時だけコミット）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/state.json
+          if git diff --cached --quiet; then
+            echo "状態に変化なし。コミットしません。"
+          else
+            git commit -m "chore: update warning state [skip ci]"
+            git push
+          fi
