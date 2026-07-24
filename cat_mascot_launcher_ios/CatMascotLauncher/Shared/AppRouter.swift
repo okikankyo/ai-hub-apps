@@ -5,8 +5,12 @@ import SwiftUI
 /// and drives the mascot's mood shown on screen.
 @MainActor
 final class AppRouter: ObservableObject {
-    @Published var mood: CatMood = SharedStore.mood
+    @Published var mood: CatMood
     @Published var lastLaunchedShortcut: LaunchShortcut?
+
+    init() {
+        self.mood = SharedStore.mood
+    }
 
     func refreshMood() {
         mood = SharedStore.mood

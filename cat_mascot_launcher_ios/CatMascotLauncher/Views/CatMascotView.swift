@@ -20,6 +20,13 @@ struct CatMascotView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
         }
+        .frame(maxWidth: .infinity)
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(UIColor.secondarySystemBackground))
+        )
+        .padding()
     }
 }
 
