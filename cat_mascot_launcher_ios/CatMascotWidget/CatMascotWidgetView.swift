@@ -21,6 +21,9 @@ struct CatMascotWidgetView: View {
                 .foregroundStyle(.orange)
             Text(entry.mood.emoji)
                 .font(.title2)
+            Text("Pet me!")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .widgetURL(URL(string: "catlauncher://open"))
