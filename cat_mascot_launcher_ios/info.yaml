@@ -1,0 +1,20 @@
+name: Cat Mascot Launcher iOS
+id: cat_mascot_launcher_ios
+license_url: https://github.com/qualcomm/ai-hub-apps/blob/main/LICENSE
+license_type: bsd-3-clause
+status: published
+domain: Utilities
+headline: A playful mascot-based launcher app for iOS
+description: >
+  Cat Mascot Launcher is an interactive iOS app featuring a cute cat mascot that reacts to your interactions.
+  Customize quick-launch shortcuts to your favorite apps, websites, and services. Add the widget to your home screen
+  or lock screen for instant access. Share state between the main app and widget via App Groups, and use the
+  `catlauncher://` URL scheme to trigger moods and shortcuts from Shortcuts app or Safari.
+app_type: ios
+os:
+  name: iOS
+  version: 17.0+
+languages: [Swift]
+use_case: Productivity
+runtime: SwiftUI
+app_repo_relative_path: cat_mascot_launcher_ios
