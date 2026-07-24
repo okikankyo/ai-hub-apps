@@ -22,9 +22,9 @@ struct CatMascotWidgetView: View {
             Text(entry.mood.emoji)
                 .font(.title2)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .widgetURL(URL(string: "catlauncher://open"))
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(.fill.secondary, for: .widget)
     }
 
     private var mediumView: some View {
@@ -37,21 +37,29 @@ struct CatMascotWidgetView: View {
                     Text(entry.mood.emoji)
                 }
                 .frame(width: 64)
+                .contentShape(Rectangle())
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                ForEach(entry.shortcuts.prefix(3)) { shortcut in
-                    Link(destination: URL(string: "catlauncher://launch?id=\(shortcut.id.uuidString)")!) {
-                        Label(shortcut.title, systemImage: shortcut.symbolName)
-                            .font(.caption)
+                if !entry.shortcuts.isEmpty {
+                    ForEach(entry.shortcuts.prefix(3)) { shortcut in
+                        Link(destination: URL(string: "catlauncher://launch?id=\(shortcut.id.uuidString)")!) {
+                            Label(shortcut.title, systemImage: shortcut.symbolName)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                        }
                     }
+                } else {
+                    Text("No shortcuts")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             Spacer(minLength: 0)
         }
         .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .containerBackground(.fill.secondary, for: .widget)
     }
 }
 
