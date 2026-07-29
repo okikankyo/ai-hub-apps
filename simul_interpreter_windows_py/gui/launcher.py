@@ -20,6 +20,8 @@ from interpreter.asr import Transcriber
 from interpreter.audio_loopback import LoopbackRecorder
 from interpreter.conversation import ConversationSession
 from interpreter.display_layout import detect_dual_monitor_layout
+from interpreter.summarize import Summarizer
+from interpreter.transcript import TranscriptLog
 from interpreter.translate import Translator
 from interpreter.tts import Speaker
 
@@ -28,6 +30,8 @@ STRINGS = {
     "stop_conversation": "🧑‍🤝‍🧑  対面通訳を停止 / Stop face-to-face",
     "start_subtitles": "🖥️  PC音声字幕を開始 / Start PC-audio subtitles",
     "stop_subtitles": "🖥️  PC音声字幕を停止 / Stop PC-audio subtitles",
+    "show_transcript": "📝  文字起こし・要約を表示 / Show transcript & summary",
+    "hide_transcript": "📝  文字起こし・要約を閉じる / Hide transcript & summary",
 }
 
 
@@ -40,15 +44,19 @@ class LauncherApp:
         self,
         transcriber: Transcriber,
         translator: Translator,
+        summarizer: Summarizer,
         args: argparse.Namespace,
     ) -> None:
         self._transcriber = transcriber
         self._translator = translator
+        self._summarizer = summarizer
         self._args = args
+        self._transcript_log = TranscriptLog()
 
         self._conversation = None  # InterpreterApp | None
         self._subtitles_overlay = None
         self._subtitles_stop_event: Optional[threading.Event] = None
+        self._transcript_panel = None  # TranscriptPanel | None
 
         self.root = tk.Tk()
         self.root.title("同時通訳 / Interpreter Launcher")
@@ -76,6 +84,13 @@ class LauncherApp:
         )
         self.subtitles_button.pack(fill="x", ipady=10, pady=6)
 
+        self.transcript_button = ttk.Button(
+            frame,
+            text=STRINGS["show_transcript"],
+            command=self._toggle_transcript_panel,
+        )
+        self.transcript_button.pack(fill="x", ipady=10, pady=6)
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def run(self) -> None:
@@ -92,7 +107,16 @@ class LauncherApp:
     def _start_conversation(self) -> None:
         from gui.app_window import InterpreterApp
 
-        session = ConversationSession(self._transcriber, self._translator)
+        def on_turn(turn) -> None:
+            self._transcript_log.append(
+                source="face_to_face",
+                original_lang=turn.speaker_lang,
+                original_text=turn.original_text,
+                translated_lang=turn.listener_lang,
+                translated_text=turn.translated_text,
+            )
+
+        session = ConversationSession(self._transcriber, self._translator, on_turn=on_turn)
         voice_by_lang = {}
         if self._args.ja_voice_id:
             voice_by_lang["ja"] = self._args.ja_voice_id
@@ -133,6 +157,15 @@ class LauncherApp:
         stop_event = threading.Event()
         self._subtitles_stop_event = stop_event
 
+        def on_entry(original: str, translated: str) -> None:
+            self._transcript_log.append(
+                source="pc_audio",
+                original_lang="en",
+                original_text=original,
+                translated_lang="ja",
+                translated_text=translated,
+            )
+
         def on_overlay_close() -> None:
             stop_event.set()
             self._subtitles_overlay = None
@@ -158,7 +191,14 @@ class LauncherApp:
 
         threading.Thread(
             target=run_pipeline,
-            args=(recorder, self._transcriber, self._translator, results, stop_event),
+            args=(
+                recorder,
+                self._transcriber,
+                self._translator,
+                results,
+                stop_event,
+                on_entry,
+            ),
             daemon=True,
         ).start()
         poll()
@@ -172,9 +212,40 @@ class LauncherApp:
             overlay.close()
         self.subtitles_button.configure(text=STRINGS["start_subtitles"])
 
+    # -- Shared transcript & summary panel -----------------------------------
+
+    def _toggle_transcript_panel(self) -> None:
+        if self._transcript_panel is None:
+            self._start_transcript_panel()
+        else:
+            self._stop_transcript_panel()
+
+    def _start_transcript_panel(self) -> None:
+        from gui.transcript_panel import TranscriptPanel
+
+        def on_panel_close() -> None:
+            self._transcript_panel = None
+            self.transcript_button.configure(text=STRINGS["show_transcript"])
+
+        panel = TranscriptPanel(
+            self._transcript_log,
+            self._summarizer,
+            master=self.root,
+            on_close=on_panel_close,
+        )
+        self._transcript_panel = panel
+        self.transcript_button.configure(text=STRINGS["hide_transcript"])
+
+    def _stop_transcript_panel(self) -> None:
+        if self._transcript_panel is not None:
+            panel, self._transcript_panel = self._transcript_panel, None
+            panel.close()
+        self.transcript_button.configure(text=STRINGS["show_transcript"])
+
     # -- Shutdown -----------------------------------------------------------
 
     def _on_close(self) -> None:
         self._stop_conversation()
         self._stop_subtitles()
+        self._stop_transcript_panel()
         self.root.destroy()

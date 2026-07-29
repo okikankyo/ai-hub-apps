@@ -1,7 +1,8 @@
 ## Real-time Simultaneous Interpreter for Snapdragon X Elite
 
 One app (`python demo.py`), one small launcher window, two interpreter modes
-you can start independently -- or both at once:
+you can start independently -- or both at once -- plus a shared transcript
+and summary you can open at any time:
 
 * **Face-to-face conversation** (dual-display) -- for when you're physically
   speaking with someone (e.g. at a tourist site).
@@ -9,6 +10,9 @@ you can start independently -- or both at once:
   the other party's voice in an online call) translated to Japanese in a
   small overlay next to whatever's actually playing the audio. For when you
   can't get the other party to run any translation themselves.
+* **Transcript & summary** -- a scrollable, chat-style log of everything
+  either mode has produced, plus an on-device-LLM summary that stays
+  readable even if the topic changed partway through a long session.
 
 Both modes share one loaded Whisper model and one translator instance
 (loaded once at startup) instead of loading either twice -- see
@@ -59,6 +63,31 @@ so there's an inherent few-second lag and mid-sentence cuts are possible.
 Right-click or press Escape on the overlay to close it (it has no title bar,
 so drag anywhere on it to reposition instead).
 
+## Transcript & chronological summary
+
+Both modes write every entry (original text, translation, timestamp) into
+one shared `TranscriptLog`. Click **"Show transcript & summary"** in the
+launcher to open a window with two tabs:
+
+* **文字起こし (Transcript)** -- a scrollable, chat-style log of everything
+  said so far, in order, tagged by which mode produced it. Scrolling up to
+  reread history is safe: new lines only auto-scroll the view if you were
+  already at the bottom.
+* **要約 (Summary)** -- click "更新 / Refresh" (or wait for the automatic
+  refresh, default every 20s once there's new content) to have the same
+  on-device LLM used for translation summarize the transcript so far. The
+  summary prompt (`interpreter/summarize.py: SUMMARY_SYSTEM_PROMPT`)
+  explicitly asks for **chronological, per-topic bullets** rather than one
+  blended paragraph, so if the conversation or video's subject changed
+  partway through, the summary still reads clearly instead of mixing
+  everything together.
+
+This reuses the same NPU-accelerated Genie LLM already loaded for
+translation (`GenieSummarizer`, just a different system prompt) -- a
+summary is a short, occasional request, which is a good fit for that
+already-loaded on-device model rather than a separate one. `--translator echo`
+also gets you `EchoSummarizer`, a no-model dev/test stand-in (see below).
+
 ## Architecture
 
 ```
@@ -78,8 +107,16 @@ Mode 1 (conversation):
 Mode 2 (PC-audio subtitles):
  system audio ─▶ LoopbackRecorder ──chunk──▶ WhisperTranscriber (NPU, "en") ─▶ GenieTranslator (NPU LLM, en→ja) ─▶ SubtitleOverlay (Tk)
 
-Both modes are started/stopped from gui/launcher.py's LauncherApp, which owns
-the one Tk root, the one loaded WhisperTranscriber, and the one Translator.
+Both modes' finished entries also flow into one shared TranscriptLog:
+
+ Turn (mode 1) / (text, translated) (mode 2) ─▶ TranscriptLog ─▶ TranscriptPanel (Tk)
+                                                                       │ "Refresh" (manual or timed)
+                                                                       ▼
+                                                              GenieSummarizer (NPU LLM)
+
+Both modes (and the transcript panel) are started/stopped from
+gui/launcher.py's LauncherApp, which owns the one Tk root, the one loaded
+WhisperTranscriber, the one Translator, and the one Summarizer.
 ```
 
 * `interpreter/asr.py` -- `WhisperTranscriber`, wrapping `qai_hub_models`'
@@ -95,19 +132,27 @@ the one Tk root, the one loaded WhisperTranscriber, and the one Translator.
   the two mode-1 windows on the two physical displays.
 * `interpreter/audio_loopback.py` -- `LoopbackRecorder`, WASAPI-loopback
   system-audio capture in fixed-size chunks (mode 2).
+* `interpreter/transcript.py` -- `TranscriptLog`/`TranscriptEntry`, the
+  thread-safe shared history both modes append to.
+* `interpreter/summarize.py` -- `Summarizer` protocol, `GenieSummarizer`
+  (same CLI as `GenieTranslator`, a chronological/topic-shift-aware system
+  prompt) and `EchoSummarizer` (no-model dev/test stand-in).
 * `gui/app_window.py` -- the Tkinter dual-window UI and push-to-talk recording
   (mode 1); `InterpreterApp` takes an optional `master` so it can run as a
   `Toplevel` of the launcher's root instead of creating its own `Tk()`.
 * `gui/subtitle_overlay.py` -- the borderless overlay window (mode 2); same
   optional-`master` pattern as `InterpreterApp`.
+* `gui/transcript_panel.py` -- `TranscriptPanel`, the tabbed
+  transcript/summary window; same optional-`master` pattern.
 * `gui/launcher.py` -- `LauncherApp`, the single control panel that starts/
-  stops either mode, holding the shared `Tk()` root and the shared
-  transcriber/translator instances.
+  stops either mode and the transcript panel, holding the shared `Tk()` root
+  and the shared transcriber/translator/summarizer instances.
 * `demo.py` -- the main CLI entry point: loads Whisper + the translator once,
   then shows the launcher.
 * `subtitles.py` -- a lightweight standalone alternative to mode 2 (no
-  launcher, no conversation mode, just the subtitle overlay) for when you
-  only ever want that one thing.
+  launcher, no conversation mode) for when you only ever want live PC-audio
+  subtitles -- it still opens its own transcript/summary panel alongside the
+  overlay.
 
 ## Requirements
 
@@ -187,7 +232,7 @@ python demo.py `
 ```
 
 This loads Whisper and the translator once, then opens a small launcher
-window with two buttons:
+window with three buttons:
 
 * **Start face-to-face** -- opens the two conversation windows on your two
   displays automatically (`screeninfo` picks display index 1 for the guest
@@ -201,9 +246,13 @@ window with two buttons:
 * **Start PC-audio subtitles** -- opens the subtitle overlay, which starts
   translating whatever English audio is currently playing on the PC (see
   `--chunk-seconds`/`--loopback-device`).
+* **Show transcript & summary** -- opens the transcript/summary window (see
+  [Transcript & chronological summary](#transcript--chronological-summary)
+  above). Independent of the other two -- open or close it at any time,
+  whether either mode is running or not.
 
-Press either button again to stop that mode; closing the launcher window
-stops both.
+Press a button again to stop/close that mode/window; closing the launcher
+window stops everything.
 
 ### Trying it without Genie/QAIRT set up
 
@@ -235,27 +284,42 @@ Snapdragon device attached, so be aware of the boundary between what's been
 exercised and what hasn't:
 
 * **Verified in that environment:** `ConversationSession`/`Turn`/confirmation
-  scoring, `ChatTemplate` prompt assembly, `EchoTranslator`, monitor-layout
-  detection/fallback, `LoopbackRecorder`'s chunking/downmixing logic (fed
-  synthetic audio blocks directly, no real audio device), and the full
-  Tkinter UI for both modes -- all with `pytest` (for the non-Tk logic) or a
-  manual script under Xvfb (for `InterpreterApp`, `SubtitleOverlay`, and
-  `LauncherApp`, since this sandbox's main Python install has no `tkinter`).
-  The Xvfb pass covered: building the launcher, starting both modes
-  *simultaneously* from it (one shared Tk root, one shared fake
-  transcriber/translator), a fake chunk flowing through to the subtitle
-  overlay's text, and stopping both cleanly. See `tests/`.
+  scoring, `ChatTemplate` prompt assembly, `EchoTranslator`/`EchoSummarizer`,
+  `TranscriptLog`/chat-line/summary-input formatting, `run_pipeline`'s
+  `on_entry` callback, monitor-layout detection/fallback,
+  `LoopbackRecorder`'s chunking/downmixing logic (fed synthetic audio blocks
+  directly, no real audio device), and the full Tkinter UI for all three
+  windows -- all with `pytest` (for the non-Tk logic) or a manual script
+  under Xvfb (for `InterpreterApp`, `SubtitleOverlay`, `TranscriptPanel`, and
+  `LauncherApp`, since this sandbox's main Python install has no `tkinter`;
+  a Python 3.12 + `python3-tk` venv was used instead). The Xvfb pass covered:
+  building the launcher, starting both modes *simultaneously* from it (one
+  shared Tk root, one shared fake transcriber/translator), a fake chunk
+  flowing through to the subtitle overlay's text, opening the transcript
+  panel and confirming entries from *both* modes appeared in chronological
+  order in the transcript tab, requesting a summary refresh and confirming
+  the summary tab populated, and stopping everything cleanly. That pass is
+  also what caught and fixed a real bug: `TranscriptPanel._summarize_worker`
+  originally called `self.root.after(...)` directly from its background
+  thread, which crashed under Xvfb's non-mainloop-driven event pump; it now
+  follows this app's established pattern of pushing onto a plain
+  `queue.Queue` that the main thread's own `after`-scheduled poll drains,
+  same as `InterpreterApp`/`SubtitleOverlay` already do. See `tests/`.
 * **Not runnable without a Snapdragon X Elite Windows machine:** the actual
   QNN-accelerated Whisper inference, the `genie-t2t-run` subprocess against a
   real compiled LLM, SAPI5 TTS, and WASAPI loopback capture (`sounddevice`'s
   `WasapiSettings(loopback=True)` requires the Windows PortAudio backend --
   there's nothing to loop back to on this Linux sandbox, so `LoopbackRecorder`
   was only exercised through its testable `ingest()` method, never `start()`).
-  In particular, `GenieTranslator` assumes
-  `genie-t2t-run --config <path> --prompt <text>` and treats stdout as the
+  In particular, `GenieTranslator` and `GenieSummarizer` both assume
+  `genie-t2t-run --config <path> --prompt <text>` and treat stdout as the
   response; **check `genie-t2t-run --help` against your installed QAIRT SDK
   version** and adjust `--genie-executable`/`config_flag`/`prompt_flag`, or
-  pass a custom `response_parser` to `GenieTranslator`, if it differs.
+  pass a custom `response_parser`, if it differs. The summary's actual
+  *quality* -- whether a real Llama-class model reliably follows the
+  "chronological, per-topic bullets" instruction -- is also unverified here;
+  it's a prompting request, not a guarantee, so check it against your model
+  and adjust `SUMMARY_SYSTEM_PROMPT` if it drifts back to one paragraph.
 
 ## Limitations
 
@@ -275,3 +339,9 @@ exercised and what hasn't:
 * Running both modes at once works (they're independent threads/windows),
   but they each still call into Whisper/Genie, so expect roughly double the
   NPU/CPU load compared to running just one.
+* The transcript/summary is not persisted -- it's an in-memory `TranscriptLog`
+  for the current run only; closing the launcher (or `subtitles.py`) loses it.
+* Summarization is a full LLM call over the whole transcript so far every
+  time it refreshes (no incremental/rolling summarization), so on a very
+  long session each refresh gets slower and the automatic-refresh interval
+  may need raising via `TranscriptPanel(auto_refresh_ms=...)`.

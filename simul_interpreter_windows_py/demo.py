@@ -21,6 +21,7 @@ import argparse
 import logging
 
 from interpreter.asr import WhisperTranscriber
+from interpreter.summarize import EchoSummarizer, GenieSummarizer, Summarizer
 from interpreter.translate import EchoTranslator, GenieTranslator, Translator
 from interpreter.tts import list_installed_voices
 
@@ -109,6 +110,19 @@ def build_translator(args: argparse.Namespace) -> Translator:
     )
 
 
+def build_summarizer(args: argparse.Namespace) -> Summarizer:
+    """Reuses the same `--translator`/`--genie-*` flags as `build_translator`:
+    the transcript-summary feature is the same on-device LLM, just with a
+    different prompt, so there's no separate model to configure."""
+    if args.translator == "echo":
+        return EchoSummarizer()
+    return GenieSummarizer(
+        genie_config_path=args.genie_config_path,
+        chat_template_path=args.genie_chat_template_path,
+        executable=args.genie_executable,
+    )
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
     logging.basicConfig(level=args.log_level)
@@ -125,6 +139,7 @@ def main() -> None:
         return
 
     translator = build_translator(args)
+    summarizer = build_summarizer(args)
 
     print("Loading Whisper model...")
     transcriber = WhisperTranscriber(
@@ -137,7 +152,12 @@ def main() -> None:
     # for --list-audio-devices/--list-voices above.
     from gui.launcher import LauncherApp
 
-    app = LauncherApp(transcriber=transcriber, translator=translator, args=args)
+    app = LauncherApp(
+        transcriber=transcriber,
+        translator=translator,
+        summarizer=summarizer,
+        args=args,
+    )
     app.run()
 
 

@@ -17,9 +17,12 @@ import argparse
 import logging
 import queue
 import threading
+from typing import Callable, Optional
 
 from interpreter.asr import WhisperTranscriber
 from interpreter.audio_loopback import LoopbackChunk, LoopbackRecorder
+from interpreter.summarize import EchoSummarizer, GenieSummarizer, Summarizer
+from interpreter.transcript import TranscriptLog
 from interpreter.translate import EchoTranslator, GenieTranslator, Translator
 
 logger = logging.getLogger(__name__)
@@ -91,17 +94,33 @@ def build_translator(args: argparse.Namespace) -> Translator:
     )
 
 
+def build_summarizer(args: argparse.Namespace) -> Summarizer:
+    """Reuses the same `--translator`/`--genie-*` flags as `build_translator`:
+    the summarizer is the same on-device LLM, just with a different prompt,
+    so there's no separate model to configure."""
+    if args.translator == "echo":
+        return EchoSummarizer()
+    return GenieSummarizer(
+        genie_config_path=args.genie_config_path,
+        chat_template_path=args.genie_chat_template_path,
+        executable=args.genie_executable,
+    )
+
+
 def run_pipeline(
     recorder: LoopbackRecorder,
     transcriber: WhisperTranscriber,
     translator: Translator,
     results: "queue.Queue[tuple[str, str] | None]",
     stop_event: threading.Event,
+    on_entry: Optional[Callable[[str, str], None]] = None,
 ) -> None:
     """Pulls finished audio chunks off `recorder`, transcribes (English) and
     translates (-> Japanese) each one, and pushes (original, translated) text
     pairs onto `results`. Runs on a background thread; `stop_event` is how the
-    caller asks it to exit."""
+    caller asks it to exit. `on_entry`, if given, is called with
+    (original_text, translated_text) for each entry -- e.g. to log it into a
+    shared `interpreter.transcript.TranscriptLog`."""
     recorder.start()
     try:
         while not stop_event.is_set():
@@ -113,6 +132,8 @@ def run_pipeline(
             if not text.strip():
                 continue
             translated = translator.translate(text, "en", "ja")
+            if on_entry is not None:
+                on_entry(text, translated)
             results.put((text, translated))
     finally:
         recorder.stop()
@@ -138,17 +159,31 @@ def main() -> None:
         model_id=args.whisper_model_id,
     )
 
+    summarizer = build_summarizer(args)
+    transcript_log = TranscriptLog()
+
     recorder = LoopbackRecorder(
         chunk_seconds=args.chunk_seconds, device=args.loopback_device
     )
     results: "queue.Queue[tuple[str, str] | None]" = queue.Queue()
     stop_event = threading.Event()
 
+    def on_entry(original: str, translated: str) -> None:
+        transcript_log.append(
+            source="pc_audio",
+            original_lang="en",
+            original_text=original,
+            translated_lang="ja",
+            translated_text=translated,
+        )
+
     # Imported here: Tk requires a display, which isn't available (or needed)
     # for --list-audio-devices above.
     from gui.subtitle_overlay import SubtitleOverlay
+    from gui.transcript_panel import TranscriptPanel
 
     overlay = SubtitleOverlay(on_close=stop_event.set)
+    TranscriptPanel(transcript_log, summarizer, master=overlay.root)
 
     def poll() -> None:
         try:
@@ -165,7 +200,7 @@ def main() -> None:
 
     threading.Thread(
         target=run_pipeline,
-        args=(recorder, transcriber, translator, results, stop_event),
+        args=(recorder, transcriber, translator, results, stop_event, on_entry),
         daemon=True,
     ).start()
     poll()

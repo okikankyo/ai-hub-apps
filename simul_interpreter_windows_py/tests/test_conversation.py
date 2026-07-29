@@ -60,6 +60,24 @@ def test_process_utterance_uses_transcriber_then_translator():
     assert turn.translated_text == "[EN] test audio transcript"
 
 
+def test_on_turn_callback_invoked_with_each_finished_turn():
+    seen = []
+    session = ConversationSession(
+        FakeTranscriber(""), EchoTranslator(), on_turn=seen.append
+    )
+
+    turn = session.process_text("hello", "en")
+
+    assert seen == [turn]
+
+
+def test_on_turn_callback_is_optional():
+    session = ConversationSession(FakeTranscriber(""), EchoTranslator())
+
+    # Should not raise even though no on_turn was given.
+    session.process_text("hello", "en")
+
+
 def test_multiple_turns_accumulate_in_order():
     session = ConversationSession(FakeTranscriber(""), EchoTranslator())
 

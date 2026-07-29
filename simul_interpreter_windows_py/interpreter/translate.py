@@ -45,6 +45,28 @@ class Translator(Protocol):
     def translate(self, text: str, source_lang: str, target_lang: str) -> str: ...
 
 
+def run_genie_completion(
+    executable: str,
+    config_flag: str,
+    config_path: str,
+    prompt_flag: str,
+    prompt: str,
+    timeout_seconds: float,
+) -> str:
+    """Shells out to `genie-t2t-run` (or equivalent) with a fully-assembled
+    prompt and returns raw stdout. Shared by `GenieTranslator` and
+    `interpreter.summarize.GenieSummarizer` -- both run the same CLI against
+    the same on-device LLM, just with a different system prompt."""
+    completed = subprocess.run(
+        [executable, config_flag, config_path, prompt_flag, prompt],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=True,
+    )
+    return completed.stdout
+
+
 @dataclass
 class ChatTemplate:
     """Mirrors the `genie.chat_template` block in an AI Hub Models LLM export's
@@ -114,20 +136,15 @@ class GenieTranslator:
             return ""
 
         prompt = self._template.build_prompt(system_prompt, text)
-        completed = subprocess.run(
-            [
-                self._executable,
-                self._config_flag,
-                self._genie_config_path,
-                self._prompt_flag,
-                prompt,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=self._timeout_seconds,
-            check=True,
+        stdout = run_genie_completion(
+            self._executable,
+            self._config_flag,
+            self._genie_config_path,
+            self._prompt_flag,
+            prompt,
+            self._timeout_seconds,
         )
-        return self._response_parser(completed.stdout)
+        return self._response_parser(stdout)
 
     @staticmethod
     def _default_response_parser(stdout: str) -> str:

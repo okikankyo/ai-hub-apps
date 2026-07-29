@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -56,9 +57,15 @@ class ConversationSession:
     """Owns the running transcript for one interpretation session and drives
     each utterance through ASR -> translation -> back-translation."""
 
-    def __init__(self, transcriber: Transcriber, translator: Translator) -> None:
+    def __init__(
+        self,
+        transcriber: Transcriber,
+        translator: Translator,
+        on_turn: Optional[Callable[[Turn], None]] = None,
+    ) -> None:
         self._transcriber = transcriber
         self._translator = translator
+        self._on_turn = on_turn
         self.turns: list[Turn] = []
 
     def process_utterance(
@@ -97,4 +104,6 @@ class ConversationSession:
             confirmation_level=confirmation_level(score),
         )
         self.turns.append(turn)
+        if self._on_turn is not None:
+            self._on_turn(turn)
         return turn
