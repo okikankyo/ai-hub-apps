@@ -161,9 +161,14 @@ WhisperTranscriber, the one Translator, and the one Summarizer.
   plugged in, or two monitors on a kiosk build), a microphone, and speakers.
 * For mode 2: no extra hardware -- it captures whatever the PC is already
   playing.
-* [QAIRT SDK](https://qpm.qualcomm.com/#/main/tools/details/Qualcomm_AI_Runtime_SDK)
-  installed, providing `genie-t2t-run.exe` and the QNN ONNX Runtime execution
-  provider.
+* The **QNN ONNX Runtime execution provider** for Whisper -- this comes from
+  the `onnxruntime-qnn` pip package (installed by `install_python_deps.ps1`
+  below), so no separate SDK download is needed just for mode 1/2's speech
+  recognition.
+* The **[QAIRT SDK](https://qpm.qualcomm.com/#/main/tools/details/Qualcomm_AI_Runtime_SDK)**
+  installed separately, providing `genie-t2t-run.exe` -- this *is* a manual
+  download/extract step (see Setup step 5 below), needed for translation and
+  summarization (`GenieTranslator`/`GenieSummarizer`).
 * An LLM exported for Genie (e.g. Llama 3.2 3B Instruct) from
   [AI Hub Models](https://aihub.qualcomm.com/models?domain=Generative+AI&useCase=Text+Generation),
   set up the same way as `../chatapp_android` (`genie_config.json` +
@@ -192,25 +197,49 @@ WhisperTranscriber, the one Translator, and the one Summarizer.
    ```
 
 4. Install Python dependencies (Whisper + this app's extras: `screeninfo`,
-   `pyttsx3`):
+   `pyttsx3`). This also pulls in `onnxruntime-qnn`, which is all mode 1/2's
+   speech recognition needs from the NPU side -- no separate SDK download:
 
    ```powershell
    .\install_python_deps.ps1 -model whisper-base
    ```
 
-5. Export the Whisper model for QNN, exactly as in `../whisper_windows_py`
+5. Install the QAIRT SDK, which provides `genie-t2t-run.exe` (needed for
+   translation/summarization, not for speech recognition -- see step 4).
+   This repo already has a shared installer for it in `../chatapp_android`:
+
+   ```powershell
+   . ..\chatapp_android\scripts\qairt_utils.ps1
+   Install-Qairt
+   echo "QAIRT_PATH=$env:QAIRT_PATH"
+   ```
+
+   `genie-t2t-run.exe`'s exact subdirectory under `$env:QAIRT_PATH` varies by
+   SDK version and build target (e.g. an `x86_64-windows-msvc`-style path) --
+   locate it once and either add that directory to your `PATH`, or pass its
+   full path via `--genie-executable` to `demo.py`/`subtitles.py`:
+
+   ```powershell
+   Get-ChildItem -Path $env:QAIRT_PATH -Recurse -Filter "genie-t2t-run.exe"
+   ```
+
+6. Export the Whisper model for QNN, exactly as in `../whisper_windows_py`
    (see [its README](../whisper_windows_py/README.md) step 7 for the full
    command), placing the result at `models\whisper\encoder.onnx` /
    `models\whisper\decoder.onnx`.
 
-6. Obtain a Genie-compiled LLM and place `genie_config.json`, `metadata.json`,
+7. Obtain a Genie-compiled LLM and place `genie_config.json`, `metadata.json`,
    the tokenizer, and the `.bin` context files under `models\llm\` --
    following the same steps as `../chatapp_android`'s
-   ["Exporting an LLM"](../chatapp_android/README.md) section. Update
-   `genie_config.json`'s `<models_path>`/`<tokenizer_path>` placeholders to
-   point at `models\llm\`.
+   ["Exporting an LLM"](../chatapp_android/README.md) section, **but export
+   for this PC's own chipset, not a phone**: `chatapp_android`'s example
+   command targets `--device "Snapdragon 8 Elite QRD"` (a mobile device,
+   since that app runs on Android); substitute the same
+   `--device "Snapdragon X Elite CRD"` (or X2 Elite equivalent) used for the
+   Whisper export in step 6 instead. Update `genie_config.json`'s
+   `<models_path>`/`<tokenizer_path>` placeholders to point at `models\llm\`.
 
-7. Find your microphone and a Japanese/English TTS voice:
+8. Find your microphone and a Japanese/English TTS voice:
 
    ```powershell
    python demo.py --list-audio-devices
@@ -320,6 +349,14 @@ exercised and what hasn't:
   "chronological, per-topic bullets" instruction -- is also unverified here;
   it's a prompting request, not a guarantee, so check it against your model
   and adjust `SUMMARY_SYSTEM_PROMPT` if it drifts back to one paragraph.
+  Likewise, the Setup section's QAIRT SDK install step (`Install-Qairt` from
+  `../chatapp_android/scripts/qairt_utils.ps1`) and the note about
+  `genie-t2t-run.exe`'s subdirectory varying by SDK version are both
+  reasoned from that script's contents and from how `onnxruntime-qnn` (pip)
+  vs. the QAIRT SDK divide responsibilities elsewhere in this repo -- neither
+  was actually run here, since doing so needs a real QAIRT SDK download and
+  Windows. If `Install-Qairt` or the `Get-ChildItem` search don't work as
+  described, that's the boundary to double-check first.
 
 ## Limitations
 
