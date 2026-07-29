@@ -14,7 +14,13 @@ import logging
 from interpreter.asr import WhisperTranscriber
 from interpreter.conversation import ConversationSession
 from interpreter.display_layout import detect_dual_monitor_layout
-from interpreter.translate import EchoTranslator, GenieTranslator, Translator
+from interpreter.translate import (
+    ClaudeTranslator,
+    EchoTranslator,
+    FallbackTranslator,
+    GenieTranslator,
+    Translator,
+)
 from interpreter.tts import Speaker, list_installed_voices
 
 
@@ -37,10 +43,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--translator",
-        choices=["genie", "echo"],
+        choices=["genie", "claude", "hybrid", "echo"],
         default="genie",
-        help="'echo' does not actually translate -- it's a dev/test stand-in for "
-        "exercising the UI and pipeline without Genie/QAIRT installed.",
+        help="'genie' is fully on-device/NPU (needs QAIRT + a compiled LLM). "
+        "'claude' calls the Claude API over the network for higher translation "
+        "quality, but needs connectivity. 'hybrid' tries Claude first and falls "
+        "back to Genie if the network/API call fails -- useful when the guest "
+        "device's connectivity at the tourist site is unreliable. 'echo' does "
+        "not actually translate -- it's a dev/test stand-in for exercising the "
+        "UI and pipeline without Genie/QAIRT/Claude set up.",
     )
     parser.add_argument(
         "--genie-config-path",
@@ -53,6 +64,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="metadata.json shipped with the LLM export, containing genie.chat_template.",
     )
     parser.add_argument("--genie-executable", default="genie-t2t-run.exe")
+
+    parser.add_argument(
+        "--claude-api-key",
+        default=None,
+        help="Claude API key. Defaults to the ANTHROPIC_API_KEY environment variable.",
+    )
+    parser.add_argument(
+        "--claude-model",
+        default="claude-haiku-4-5-20251001",
+        help="Kept fast/cheap by default since translation is on the real-time path; "
+        "pass a more capable model (e.g. claude-sonnet-5) if latency allows.",
+    )
 
     parser.add_argument(
         "--ja-voice-id", default=None, help="SAPI5 voice id used to read Japanese aloud"
@@ -77,6 +100,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def build_translator(args: argparse.Namespace) -> Translator:
     if args.translator == "echo":
         return EchoTranslator()
+
+    if args.translator in ("claude", "hybrid"):
+        claude = ClaudeTranslator(api_key=args.claude_api_key, model=args.claude_model)
+        if args.translator == "claude":
+            return claude
+        genie = GenieTranslator(
+            genie_config_path=args.genie_config_path,
+            chat_template_path=args.genie_chat_template_path,
+            executable=args.genie_executable,
+        )
+        return FallbackTranslator(primary=claude, secondary=genie)
+
     return GenieTranslator(
         genie_config_path=args.genie_config_path,
         chat_template_path=args.genie_chat_template_path,

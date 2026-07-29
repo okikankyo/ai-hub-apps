@@ -1,3 +1,5 @@
 screeninfo==0.8.1
 pyttsx3==2.90
 pywin32; platform_system == "Windows"
+# Only needed for --translator claude/hybrid (calls the Claude API for translation).
+anthropic>=0.120.0
