@@ -2,9 +2,18 @@
 # Copyright (c) 2025 Qualcomm Technologies, Inc. and/or its subsidiaries.
 # SPDX-License-Identifier: BSD-3-Clause
 # ---------------------------------------------------------------------
-"""Dual-display, real-time Japanese <-> English simultaneous interpreter for
-face-to-face use (e.g. tourism), running speech recognition on the Snapdragon
-NPU via Whisper/QNN and translation via a Genie SDK LLM."""
+"""One app, two interpreter modes, started from a single small launcher
+window:
+
+* Face-to-face conversation (dual-display) -- for in-person use (e.g. tourism).
+* Live PC-audio subtitles -- English audio from this PC (a YouTube video, an
+  online call) translated to Japanese in a small overlay, for when you can't
+  get the other party to run any translation themselves.
+
+Both modes share one loaded Whisper model (NPU/QNN) and one translator
+(Genie SDK LLM, on-device/NPU) rather than loading either twice. Start
+either mode, both, or switch between them without restarting the process.
+"""
 
 from __future__ import annotations
 
@@ -12,10 +21,8 @@ import argparse
 import logging
 
 from interpreter.asr import WhisperTranscriber
-from interpreter.conversation import ConversationSession
-from interpreter.display_layout import detect_dual_monitor_layout
 from interpreter.translate import EchoTranslator, GenieTranslator, Translator
-from interpreter.tts import Speaker, list_installed_voices
+from interpreter.tts import list_installed_voices
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -54,6 +61,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--genie-executable", default="genie-t2t-run.exe")
 
+    # -- Face-to-face conversation mode options --
     parser.add_argument(
         "--ja-voice-id", default=None, help="SAPI5 voice id used to read Japanese aloud"
     )
@@ -61,13 +69,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--en-voice-id", default=None, help="SAPI5 voice id used to read English aloud"
     )
     parser.add_argument("--tts-rate", type=int, default=None)
-
     parser.add_argument(
         "--guest-monitor-index",
         type=int,
         default=1,
         help="Index (from screeninfo.get_monitors()) of the display facing the guest.",
     )
+
+    # -- PC-audio live subtitles mode options --
+    parser.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=6.0,
+        help="How many seconds of system audio to buffer before transcribing/"
+        "translating in subtitles mode. Lower is more responsive; higher is "
+        "more accurate (Whisper has more context per call).",
+    )
+    parser.add_argument(
+        "--loopback-device",
+        type=int,
+        default=None,
+        help="Output device index to capture from in subtitles mode (see "
+        "--list-audio-devices). Defaults to the system's default output device.",
+    )
+
     parser.add_argument("--list-audio-devices", action="store_true")
     parser.add_argument("--list-voices", action="store_true")
     parser.add_argument("--log-level", default="INFO")
@@ -108,22 +133,11 @@ def main() -> None:
         model_id=args.whisper_model_id,
     )
 
-    session = ConversationSession(transcriber, translator)
-
-    voice_by_lang = {}
-    if args.ja_voice_id:
-        voice_by_lang["ja"] = args.ja_voice_id
-    if args.en_voice_id:
-        voice_by_lang["en"] = args.en_voice_id
-    speaker = Speaker(voice_by_lang=voice_by_lang, rate=args.tts_rate)
-
-    layout = detect_dual_monitor_layout(guest_monitor_index=args.guest_monitor_index)
-
     # Imported here: Tk requires a display, which isn't available (or needed)
     # for --list-audio-devices/--list-voices above.
-    from gui.app_window import InterpreterApp
+    from gui.launcher import LauncherApp
 
-    app = InterpreterApp(session=session, speaker=speaker, layout=layout)
+    app = LauncherApp(transcriber=transcriber, translator=translator, args=args)
     app.run()
 
 

@@ -1,19 +1,34 @@
-## Real-time Simultaneous Interpreter for Snapdragon X Elite (dual-display)
+## Real-time Simultaneous Interpreter for Snapdragon X Elite
 
-A face-to-face speech interpreter for tourism and other in-person use cases: one
-Snapdragon X Elite/X2 Elite Windows PC drives **two displays** --
+One app (`python demo.py`), one small launcher window, two interpreter modes
+you can start independently -- or both at once:
 
-* **Self display** (facing the Japanese speaker): control panel with a
-  push-to-talk button per language, your own utterance, the translation the
-  other person heard, and a **meaning-confirmation** line (back-translation).
-* **Guest display** (facing the foreign visitor): the same conversation, but
-  laid out from their point of view.
+* **Face-to-face conversation** (dual-display) -- for when you're physically
+  speaking with someone (e.g. at a tourist site).
+* **Live PC-audio subtitles** -- English audio from this PC (a YouTube video,
+  the other party's voice in an online call) translated to Japanese in a
+  small overlay next to whatever's actually playing the audio. For when you
+  can't get the other party to run any translation themselves.
+
+Both modes share one loaded Whisper model and one translator instance
+(loaded once at startup) instead of loading either twice -- see
+`gui/launcher.py`.
 
 Speech recognition runs on-device with Whisper via ONNX Runtime + QNN (the
 Snapdragon NPU) -- the same model family as [`../whisper_windows_py`](../whisper_windows_py).
 Translation runs through an LLM via the Genie SDK (the same NPU-accelerated
 generative-AI path as [`../chatapp_android`](../chatapp_android)), since there is
 no ready-made machine-translation model in Qualcomm AI Hub Models today.
+
+## Mode 1: Face-to-face conversation
+
+One Snapdragon X Elite/X2 Elite Windows PC drives **two displays** --
+
+* **Self display** (facing the Japanese speaker): control panel with a
+  push-to-talk button per language, your own utterance, the translation the
+  other person heard, and a **meaning-confirmation** line (back-translation).
+* **Guest display** (facing the foreign visitor): the same conversation, but
+  laid out from their point of view.
 
 ### How the "meaning confirmation" feature works
 
@@ -26,20 +41,45 @@ high/medium/low confidence and color-coded, so the speaker can eyeball whether
 their meaning likely survived the trip -- not a guarantee, but a useful sanity
 check for a device used with strangers in a tourist setting.
 
+## Mode 2: Live PC-audio subtitles
+
+A small borderless, always-on-top, draggable overlay near the bottom of the
+screen -- like a caption track -- showing the last few seconds of English
+audio this PC played, and its Japanese translation. It doesn't touch your
+microphone and doesn't require the other party (in a call, or whoever made
+the video) to do anything.
+
+Audio is captured via **WASAPI loopback** (Windows-only): instead of
+recording a microphone, it records whatever a chosen *output* device is
+currently playing. It's chunked on a timer (default 6s, `--chunk-seconds`) --
+simple, and consistent with `../whisper_windows_py/demo.py`'s own
+`--stream-audio-chunk-size` approach -- rather than voice-activity detection,
+so there's an inherent few-second lag and mid-sentence cuts are possible.
+
+Right-click or press Escape on the overlay to close it (it has no title bar,
+so drag anywhere on it to reposition instead).
+
 ## Architecture
 
 ```
+Mode 1 (conversation):
                 push-to-talk               ConversationSession
- mic  ───────▶  AudioRecorder  ──audio──▶  WhisperTranscriber (NPU)
-                                                  │ text (ja or en)
-                                                  ▼
-                                         GenieTranslator (NPU LLM)
-                                          │ translated text        │ back-translated text
-                                          ▼                        ▼
-                              InterpreterApp (Tk, 2 windows)   confirmation_level()
-                                          │
-                                          ▼
-                                   Speaker (SAPI5 TTS)
+ mic  ───────▶  AudioRecorder  ──audio──▶  WhisperTranscriber (NPU) ──┐
+                                                                       │ text (ja/en)
+                                                                       ▼
+                                                              GenieTranslator (NPU LLM)
+                                                          translated text │  back-translated text
+                                                                       ▼               ▼
+                                                     InterpreterApp (Tk, 2 windows)  confirmation_level()
+                                                                       │
+                                                                       ▼
+                                                                Speaker (SAPI5 TTS)
+
+Mode 2 (PC-audio subtitles):
+ system audio ─▶ LoopbackRecorder ──chunk──▶ WhisperTranscriber (NPU, "en") ─▶ GenieTranslator (NPU LLM, en→ja) ─▶ SubtitleOverlay (Tk)
+
+Both modes are started/stopped from gui/launcher.py's LauncherApp, which owns
+the one Tk root, the one loaded WhisperTranscriber, and the one Translator.
 ```
 
 * `interpreter/asr.py` -- `WhisperTranscriber`, wrapping `qai_hub_models`'
@@ -48,19 +88,34 @@ check for a device used with strangers in a tourist setting.
   (shells out to the QAIRT SDK's `genie-t2t-run` CLI) and `EchoTranslator`
   (a no-model dev/test stand-in).
 * `interpreter/tts.py` -- `Speaker`, playing translated text through installed
-  Windows SAPI5 voices on a background thread.
+  Windows SAPI5 voices on a background thread (mode 1 only).
 * `interpreter/conversation.py` -- `ConversationSession`, `Turn`, and the
-  back-translation confirmation heuristic.
+  back-translation confirmation heuristic (mode 1).
 * `interpreter/display_layout.py` -- monitor detection (`screeninfo`) to place
-  the two windows on the two physical displays.
-* `gui/app_window.py` -- the Tkinter dual-window UI and push-to-talk recording.
-* `demo.py` -- CLI entry point wiring everything together.
+  the two mode-1 windows on the two physical displays.
+* `interpreter/audio_loopback.py` -- `LoopbackRecorder`, WASAPI-loopback
+  system-audio capture in fixed-size chunks (mode 2).
+* `gui/app_window.py` -- the Tkinter dual-window UI and push-to-talk recording
+  (mode 1); `InterpreterApp` takes an optional `master` so it can run as a
+  `Toplevel` of the launcher's root instead of creating its own `Tk()`.
+* `gui/subtitle_overlay.py` -- the borderless overlay window (mode 2); same
+  optional-`master` pattern as `InterpreterApp`.
+* `gui/launcher.py` -- `LauncherApp`, the single control panel that starts/
+  stops either mode, holding the shared `Tk()` root and the shared
+  transcriber/translator instances.
+* `demo.py` -- the main CLI entry point: loads Whisper + the translator once,
+  then shows the launcher.
+* `subtitles.py` -- a lightweight standalone alternative to mode 2 (no
+  launcher, no conversation mode, just the subtitle overlay) for when you
+  only ever want that one thing.
 
 ## Requirements
 
 * A Windows 11 PC with a Snapdragon X Elite or X2 Elite chipset.
-* Two displays (e.g. the laptop panel + an external monitor plugged in, or two
-  monitors on a kiosk build), plus a microphone and speakers.
+* For mode 1: two displays (e.g. the laptop panel + an external monitor
+  plugged in, or two monitors on a kiosk build), a microphone, and speakers.
+* For mode 2: no extra hardware -- it captures whatever the PC is already
+  playing.
 * [QAIRT SDK](https://qpm.qualcomm.com/#/main/tools/details/Qualcomm_AI_Runtime_SDK)
   installed, providing `genie-t2t-run.exe` and the QNN ONNX Runtime execution
   provider.
@@ -131,15 +186,24 @@ python demo.py `
   --en-voice-id "<id from --list-voices>"
 ```
 
-This opens two windows and places them on your two displays automatically
-(`screeninfo` picks display index 1 for the guest window by default -- pass
-`--guest-monitor-index` to change that). Drag the guest window to the correct
-physical monitor first if Windows enumerates them in an unexpected order.
+This loads Whisper and the translator once, then opens a small launcher
+window with two buttons:
 
-Each window has one push-to-talk button. Tap it, speak, tap again to stop --
-the utterance is transcribed, translated, spoken aloud on the other side, and
-both windows update with the original text, the translation, and (on the
-speaker's own window) the back-translation confirmation line.
+* **Start face-to-face** -- opens the two conversation windows on your two
+  displays automatically (`screeninfo` picks display index 1 for the guest
+  window by default -- pass `--guest-monitor-index` to change that; drag the
+  guest window to the correct physical monitor first if Windows enumerates
+  them in an unexpected order). Each window has one push-to-talk button: tap
+  it, speak, tap again to stop -- the utterance is transcribed, translated,
+  spoken aloud on the other side, and both windows update with the original
+  text, the translation, and (on the speaker's own window) the
+  back-translation confirmation line.
+* **Start PC-audio subtitles** -- opens the subtitle overlay, which starts
+  translating whatever English audio is currently playing on the PC (see
+  `--chunk-seconds`/`--loopback-device`).
+
+Press either button again to stop that mode; closing the launcher window
+stops both.
 
 ### Trying it without Genie/QAIRT set up
 
@@ -148,9 +212,21 @@ python demo.py --translator echo
 ```
 
 `EchoTranslator` doesn't actually translate (it just tags the text), but it
-lets you exercise the whole pipeline -- mic capture, Whisper transcription,
-dual-window rendering, TTS, back-translation confidence coloring -- without a
-compiled LLM.
+lets you exercise the whole pipeline -- mic/system-audio capture, Whisper
+transcription, both UIs, TTS, back-translation confidence coloring --
+without a compiled LLM.
+
+### Using only the PC-audio subtitles, without the launcher
+
+```powershell
+python subtitles.py --translator echo
+```
+
+`subtitles.py` is a standalone alternative to mode 2 above: same
+`LoopbackRecorder`/`SubtitleOverlay`/pipeline code, just without the launcher
+window or conversation mode, for when you only ever want live PC-audio
+subtitles. It accepts the same `--translator`/`--genie-*`/`--chunk-seconds`/
+`--loopback-device`/`--list-audio-devices` flags as `demo.py`.
 
 ## What's been verified vs. what needs real hardware
 
@@ -160,12 +236,22 @@ exercised and what hasn't:
 
 * **Verified in that environment:** `ConversationSession`/`Turn`/confirmation
   scoring, `ChatTemplate` prompt assembly, `EchoTranslator`, monitor-layout
-  detection/fallback, and the full Tkinter dual-window UI (built, rendered a
-  turn, ran the push-to-talk state machine) -- all with `pytest` and a
-  fake ASR/translator/recorder, run under Xvfb. See `tests/`.
+  detection/fallback, `LoopbackRecorder`'s chunking/downmixing logic (fed
+  synthetic audio blocks directly, no real audio device), and the full
+  Tkinter UI for both modes -- all with `pytest` (for the non-Tk logic) or a
+  manual script under Xvfb (for `InterpreterApp`, `SubtitleOverlay`, and
+  `LauncherApp`, since this sandbox's main Python install has no `tkinter`).
+  The Xvfb pass covered: building the launcher, starting both modes
+  *simultaneously* from it (one shared Tk root, one shared fake
+  transcriber/translator), a fake chunk flowing through to the subtitle
+  overlay's text, and stopping both cleanly. See `tests/`.
 * **Not runnable without a Snapdragon X Elite Windows machine:** the actual
   QNN-accelerated Whisper inference, the `genie-t2t-run` subprocess against a
-  real compiled LLM, and SAPI5 TTS. In particular, `GenieTranslator` assumes
+  real compiled LLM, SAPI5 TTS, and WASAPI loopback capture (`sounddevice`'s
+  `WasapiSettings(loopback=True)` requires the Windows PortAudio backend --
+  there's nothing to loop back to on this Linux sandbox, so `LoopbackRecorder`
+  was only exercised through its testable `ingest()` method, never `start()`).
+  In particular, `GenieTranslator` assumes
   `genie-t2t-run --config <path> --prompt <text>` and treats stdout as the
   response; **check `genie-t2t-run --help` against your installed QAIRT SDK
   version** and adjust `--genie-executable`/`config_flag`/`prompt_flag`, or
@@ -175,9 +261,17 @@ exercised and what hasn't:
 
 * Fixed Japanese <-> English language pair (by design, for this first
   version -- see `interpreter/conversation.py: LANGUAGE_PAIR` to extend it).
-* One speaker at a time: pressing the other side's button while one person is
-  recording is ignored.
-* The confirmation score is a coarse string-similarity heuristic, not a
+* Mode 1: one speaker at a time -- pressing the other side's button while
+  one person is recording is ignored.
+* Mode 1's confirmation score is a coarse string-similarity heuristic, not a
   semantic check -- treat "low" as "worth double-checking," not "wrong."
-* TTS uses whatever SAPI5 voices are installed on Windows; there's no
-  NPU-accelerated TTS model available yet to swap in.
+* Mode 1's TTS uses whatever SAPI5 voices are installed on Windows; there's
+  no NPU-accelerated TTS model available yet to swap in.
+* Mode 2 is English audio -> Japanese subtitles only (no TTS, no reverse
+  direction); it transcribes/translates on a fixed timer, not per-sentence,
+  so there's a several-second lag and it can cut mid-sentence.
+* Mode 2 requires Windows + WASAPI; there's no equivalent loopback API
+  wired up for Linux/macOS.
+* Running both modes at once works (they're independent threads/windows),
+  but they each still call into Whisper/Genie, so expect roughly double the
+  NPU/CPU load compared to running just one.

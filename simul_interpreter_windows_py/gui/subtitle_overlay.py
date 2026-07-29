@@ -13,10 +13,18 @@ from typing import Callable, Optional
 
 
 class SubtitleOverlay:
-    def __init__(self, on_close: Optional[Callable[[], None]] = None) -> None:
+    def __init__(
+        self,
+        on_close: Optional[Callable[[], None]] = None,
+        master: Optional[tk.Misc] = None,
+    ) -> None:
         self._on_close = on_close
+        # See InterpreterApp's `master` for why: only one Tk() per process is
+        # supported, so when this overlay is embedded in a launcher, it must
+        # be a Toplevel of that launcher's root instead of its own Tk().
+        self._owns_mainloop = master is None
 
-        self.root = tk.Tk()
+        self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self.root.title("Live Subtitles")
         self.root.attributes("-topmost", True)
         self.root.overrideredirect(True)
@@ -83,4 +91,13 @@ class SubtitleOverlay:
         self.root.destroy()
 
     def run(self) -> None:
+        """Blocks running this window's own Tk mainloop. Only valid when this
+        overlay wasn't given a `master` -- if it was, the launcher owns the
+        mainloop instead; call `close()` when done rather than `run()`."""
+        if not self._owns_mainloop:
+            raise RuntimeError(
+                "run() is only valid when SubtitleOverlay owns its own Tk root "
+                "(master=None). This instance is embedded in another app's "
+                "mainloop."
+            )
         self.root.mainloop()

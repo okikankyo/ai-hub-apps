@@ -206,6 +206,7 @@ class InterpreterApp:
         speaker: Speaker,
         layout: MonitorLayout,
         recorder_factory: Callable[[], AudioRecorder] = AudioRecorder,
+        master: tk.Misc | None = None,
     ) -> None:
         self._session = session
         self._speaker = speaker
@@ -213,8 +214,13 @@ class InterpreterApp:
         self._results: queue.Queue[Turn | Exception] = queue.Queue()
         self._active_recorder: AudioRecorder | None = None
         self._active_lang: str | None = None
+        # When embedded in a launcher (see gui/launcher.py), `master` is that
+        # launcher's root and we must not create a second Tk() -- only one Tk
+        # interpreter per process is supported. Standalone (demo.py), there's
+        # no master, so this window is the root and owns the mainloop.
+        self._owns_mainloop = master is None
 
-        self.root = tk.Tk()
+        self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self.root.title(UI_STRINGS["ja"]["window_title"])
         self.root.geometry(layout.self_geometry)
 
@@ -229,13 +235,23 @@ class InterpreterApp:
         self._widgets["ja"].build(self.root)
         self._widgets["en"].build(self.guest_window)
 
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.guest_window.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.guest_window.protocol("WM_DELETE_WINDOW", self.close)
 
         self._reset_widget_text()
         self._poll_results()
 
     def run(self) -> None:
+        """Blocks running this window's own Tk mainloop. Only valid when this
+        app wasn't given a `master` -- if it was (i.e. it's embedded in a
+        launcher), the launcher owns the mainloop instead; call `close()` when
+        done rather than `run()`."""
+        if not self._owns_mainloop:
+            raise RuntimeError(
+                "run() is only valid when InterpreterApp owns its own Tk root "
+                "(master=None). This instance is embedded in another app's "
+                "mainloop."
+            )
         self.root.mainloop()
 
     def _reset_widget_text(self) -> None:
@@ -337,6 +353,6 @@ class InterpreterApp:
             widgets.append_history(f"[!] {exc}")
             widgets.set_status("idle")
 
-    def _on_close(self) -> None:
+    def close(self) -> None:
         self._speaker.stop()
         self.root.destroy()
