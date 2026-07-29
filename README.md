@@ -72,6 +72,7 @@ __NOTE: Some of these apps will run without NPU acceleration on non-Snapdragon®
 | [Super Resolution](https://github.com/qualcomm/ai-hub-apps/tree/main/apps/super_resolution_windows_cpp)* | C++ | ONNX | OpenCV |
 | [Whisper Speech-to-Text](whisper_windows_py) | Python | ONNX |
 | [Stable Diffusion Image Generation](stable_diffusion_windows_py) | Python | ONNX |
+| [Simultaneous Interpreter](simul_interpreter_windows_py) | Python | ONNX + Genie SDK | LLM, GenAI, Dual-display |
 <!-- /WINDOWS_APPS -->
 
 <!-- UBUNTU_APPS -->
