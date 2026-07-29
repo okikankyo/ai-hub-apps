@@ -1,18 +1,10 @@
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from interpreter.translate import (
-    TRANSLATION_SYSTEM_PROMPTS,
-    ChatTemplate,
-    ClaudeTranslator,
-    EchoTranslator,
-    FallbackTranslator,
-    GenieTranslator,
-)
+from interpreter.translate import ChatTemplate, EchoTranslator, GenieTranslator
 
 METADATA = {
     "genie": {
@@ -107,94 +99,3 @@ def test_genie_translator_empty_text_skips_subprocess(monkeypatch, metadata_path
         genie_config_path="genie_config.json", chat_template_path=metadata_path
     )
     assert translator.translate("   ", "ja", "en") == ""
-
-
-class _FakeMessages:
-    def __init__(self, response_text: str, captured: dict) -> None:
-        self._response_text = response_text
-        self._captured = captured
-
-    def create(self, **kwargs):
-        self._captured.update(kwargs)
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=self._response_text)]
-        )
-
-
-def _fake_anthropic_client(response_text: str, captured: dict):
-    class FakeClient:
-        def __init__(self, **kwargs) -> None:
-            captured["client_kwargs"] = kwargs
-            self.messages = _FakeMessages(response_text, captured)
-
-    return FakeClient
-
-
-def test_claude_translator_calls_api_and_extracts_text(monkeypatch):
-    import anthropic
-
-    captured: dict = {}
-    monkeypatch.setattr(
-        anthropic, "Anthropic", _fake_anthropic_client("Hello there", captured)
-    )
-
-    translator = ClaudeTranslator(api_key="test-key", model="claude-haiku-4-5-20251001")
-    result = translator.translate("こんにちは", "ja", "en")
-
-    assert result == "Hello there"
-    assert captured["system"] == TRANSLATION_SYSTEM_PROMPTS[("ja", "en")]
-    assert captured["messages"] == [{"role": "user", "content": "こんにちは"}]
-    assert captured["model"] == "claude-haiku-4-5-20251001"
-    assert captured["client_kwargs"]["api_key"] == "test-key"
-
-
-def test_claude_translator_rejects_unconfigured_language_pair(monkeypatch):
-    import anthropic
-
-    monkeypatch.setattr(anthropic, "Anthropic", _fake_anthropic_client("x", {}))
-    translator = ClaudeTranslator(api_key="test-key")
-
-    with pytest.raises(ValueError):
-        translator.translate("bonjour", "fr", "en")
-
-
-def test_claude_translator_empty_text_skips_api_call(monkeypatch):
-    import anthropic
-
-    def fail_if_called(**kwargs):
-        raise AssertionError("messages.create should not be called for empty text")
-
-    class FakeClient:
-        def __init__(self, **kwargs) -> None:
-            self.messages = SimpleNamespace(create=fail_if_called)
-
-    monkeypatch.setattr(anthropic, "Anthropic", FakeClient)
-    translator = ClaudeTranslator(api_key="test-key")
-
-    assert translator.translate("   ", "ja", "en") == ""
-
-
-def test_fallback_translator_uses_primary_when_it_succeeds():
-    class AlwaysFails:
-        def translate(self, text, source_lang, target_lang):
-            raise AssertionError("secondary should not be called")
-
-    class Primary:
-        def translate(self, text, source_lang, target_lang):
-            return "primary result"
-
-    translator = FallbackTranslator(primary=Primary(), secondary=AlwaysFails())
-    assert translator.translate("hi", "ja", "en") == "primary result"
-
-
-def test_fallback_translator_falls_back_on_primary_error():
-    class Primary:
-        def translate(self, text, source_lang, target_lang):
-            raise ConnectionError("no network")
-
-    class Secondary:
-        def translate(self, text, source_lang, target_lang):
-            return "secondary result"
-
-    translator = FallbackTranslator(primary=Primary(), secondary=Secondary())
-    assert translator.translate("hi", "ja", "en") == "secondary result"

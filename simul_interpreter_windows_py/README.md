@@ -11,24 +11,9 @@ Snapdragon X Elite/X2 Elite Windows PC drives **two displays** --
 
 Speech recognition runs on-device with Whisper via ONNX Runtime + QNN (the
 Snapdragon NPU) -- the same model family as [`../whisper_windows_py`](../whisper_windows_py).
-This is not swappable at the CLI level: ASR always runs on the NPU.
-
-Translation is swappable, since there is no ready-made machine-translation
-model in Qualcomm AI Hub Models today:
-
-* `genie` (default) -- fully on-device/NPU, via an LLM run through the Genie
-  SDK (the same generative-AI path as [`../chatapp_android`](../chatapp_android)).
-  No network needed; translation quality is bounded by the small LLM you can
-  fit on-device (e.g. Llama 3.2 3B Instruct).
-* `claude` -- calls the Claude API over the network instead. Better
-  translation quality, but needs connectivity and doesn't touch the NPU at
-  all -- Claude's weights aren't available to compile for QNN, so this mode
-  is a cloud call, not on-device inference.
-* `hybrid` -- tries `claude` first, falls back to `genie` if the API call
-  fails (no signal, timeout, auth error). Matches the reality of a tourist
-  site: use the better cloud translation when there's signal, keep working
-  offline when there isn't.
-* `echo` -- no real translation, see "Trying it without Genie/QAIRT" below.
+Translation runs through an LLM via the Genie SDK (the same NPU-accelerated
+generative-AI path as [`../chatapp_android`](../chatapp_android)), since there is
+no ready-made machine-translation model in Qualcomm AI Hub Models today.
 
 ### How the "meaning confirmation" feature works
 
@@ -59,10 +44,9 @@ check for a device used with strangers in a tourist setting.
 
 * `interpreter/asr.py` -- `WhisperTranscriber`, wrapping `qai_hub_models`'
   `HfWhisperApp` (precompiled QNN ONNX), same as `whisper_windows_py/demo.py`.
-* `interpreter/translate.py` -- `Translator` protocol; `GenieTranslator`
-  (shells out to the QAIRT SDK's `genie-t2t-run` CLI, on-device/NPU),
-  `ClaudeTranslator` (Claude API, cloud), `FallbackTranslator` (Claude with a
-  Genie fallback), and `EchoTranslator` (a no-model dev/test stand-in).
+* `interpreter/translate.py` -- `Translator` protocol, `GenieTranslator`
+  (shells out to the QAIRT SDK's `genie-t2t-run` CLI) and `EchoTranslator`
+  (a no-model dev/test stand-in).
 * `interpreter/tts.py` -- `Speaker`, playing translated text through installed
   Windows SAPI5 voices on a background thread.
 * `interpreter/conversation.py` -- `ConversationSession`, `Turn`, and the
@@ -157,20 +141,6 @@ the utterance is transcribed, translated, spoken aloud on the other side, and
 both windows update with the original text, the translation, and (on the
 speaker's own window) the back-translation confirmation line.
 
-### Using Claude for translation instead of (or alongside) Genie
-
-```powershell
-$env:ANTHROPIC_API_KEY = "<your key>"
-python demo.py --translator hybrid `
-  --genie-config-path models\llm\genie_config.json `
-  --genie-chat-template-path models\llm\metadata.json
-```
-
-`--translator claude` skips Genie entirely (no `models\llm\` setup needed,
-but requires network); `--translator hybrid` keeps Genie configured as a
-fallback for when the guest device has no signal. `--claude-api-key` is also
-accepted as a flag instead of the environment variable.
-
 ### Trying it without Genie/QAIRT set up
 
 ```powershell
@@ -189,18 +159,10 @@ Snapdragon device attached, so be aware of the boundary between what's been
 exercised and what hasn't:
 
 * **Verified in that environment:** `ConversationSession`/`Turn`/confirmation
-  scoring, `ChatTemplate` prompt assembly, `EchoTranslator`, `GenieTranslator`'s
-  subprocess/prompt-building logic (with `subprocess.run` mocked),
-  `ClaudeTranslator`'s request/response handling (with the `anthropic` client
-  mocked) and `FallbackTranslator`'s fallback behavior, monitor-layout
+  scoring, `ChatTemplate` prompt assembly, `EchoTranslator`, monitor-layout
   detection/fallback, and the full Tkinter dual-window UI (built, rendered a
   turn, ran the push-to-talk state machine) -- all with `pytest` and a
   fake ASR/translator/recorder, run under Xvfb. See `tests/`.
-  A real `--translator claude` call against the live Claude API was **not**
-  made in that environment (no API key was used/should be committed here),
-  so the request-shape assumptions (`messages.create(model=, max_tokens=,
-  system=, messages=)`, text extracted from `response.content`) are backed
-  by inspecting the installed `anthropic` SDK, not a live call.
 * **Not runnable without a Snapdragon X Elite Windows machine:** the actual
   QNN-accelerated Whisper inference, the `genie-t2t-run` subprocess against a
   real compiled LLM, and SAPI5 TTS. In particular, `GenieTranslator` assumes
@@ -219,5 +181,3 @@ exercised and what hasn't:
   semantic check -- treat "low" as "worth double-checking," not "wrong."
 * TTS uses whatever SAPI5 voices are installed on Windows; there's no
   NPU-accelerated TTS model available yet to swap in.
-* `--translator claude`/`hybrid` sends conversation text to Anthropic's API;
-  don't use it for conversations that need to stay fully offline/on-device.
