@@ -153,6 +153,9 @@ WhisperTranscriber, the one Translator, and the one Summarizer.
   launcher, no conversation mode) for when you only ever want live PC-audio
   subtitles -- it still opens its own transcript/summary panel alongside the
   overlay.
+* `demo.spec`/`build_exe.ps1` -- PyInstaller packaging for `demo.py`, so it
+  can be run as a standalone `.exe` without a Python venv (see [Building a
+  standalone .exe](#building-a-standalone-exe)).
 
 ## Requirements
 
@@ -306,6 +309,42 @@ window or conversation mode, for when you only ever want live PC-audio
 subtitles. It accepts the same `--translator`/`--genie-*`/`--chunk-seconds`/
 `--loopback-device`/`--list-audio-devices` flags as `demo.py`.
 
+### Building a standalone .exe
+
+If you'd rather not set up a Python venv every time, `build_exe.ps1` packages
+`demo.py` (with PyInstaller) into `dist\demo\demo.exe`:
+
+```powershell
+.\build_exe.ps1
+```
+
+This does the same venv-create + dependency-install as Setup steps 3-4, then
+adds PyInstaller and builds using `demo.spec`. It does **not** shrink Setup
+steps 5-7 away, though -- `dist\demo\demo.exe` still needs, sitting next to
+it (or reachable via `PATH`), the same things `python demo.py` needs from
+source:
+
+* `models\whisper\` and `models\llm\` (too large/hardware-specific to bundle).
+* `genie-t2t-run.exe` from the QAIRT SDK (a separate, license-gated
+  download -- see Setup step 5) on `PATH`, or pass its full path via
+  `--genie-executable`.
+
+Once those are in place, run it exactly like the Python entry point:
+
+```powershell
+dist\demo\demo.exe --translator echo
+```
+
+**This has not been built or run on a real machine** -- there's no Windows
+environment available where this was developed, and PyInstaller doesn't
+cross-compile, so the `.spec` file's `collect_all` list (for `onnxruntime`,
+`qai_hub_models`, `sounddevice`, `pyttsx3`, `screeninfo` -- the packages most
+likely to have imports or native DLLs that PyInstaller's static analysis
+misses) is reasoned from how those packages are used elsewhere in this repo,
+not verified by an actual build. If `build_exe.ps1` fails, or the built exe
+errors out on a missing module/DLL, that error message is exactly what's
+needed to fix `demo.spec` -- please share it.
+
 ## What's been verified vs. what needs real hardware
 
 This app was developed and its logic tested in an environment without a
@@ -356,7 +395,9 @@ exercised and what hasn't:
   vs. the QAIRT SDK divide responsibilities elsewhere in this repo -- neither
   was actually run here, since doing so needs a real QAIRT SDK download and
   Windows. If `Install-Qairt` or the `Get-ChildItem` search don't work as
-  described, that's the boundary to double-check first.
+  described, that's the boundary to double-check first. Same boundary for
+  `build_exe.ps1`/`demo.spec` (see [Building a standalone
+  .exe](#building-a-standalone-exe)): unbuilt and unrun, for the same reason.
 
 ## Limitations
 
