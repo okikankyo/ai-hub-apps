@@ -1604,7 +1604,7 @@ function renderUsers(el, d) {
       <h3>🔔 承認待ちのユーザー(${pending.length}名)</h3>
       <p class="desc">Googleログインで新規登録されたユーザーです。申請された希望部署を参考に、部署を選んで承認してください。</p>
       <table class="data">
-        <tr><th>ユーザー</th><th>メール</th><th>申請した氏名</th><th>希望部署</th><th>登録日時</th><th>部署を割り当てて承認</th><th></th></tr>
+        <tr><th>ユーザー</th><th>メール</th><th>申請した氏名</th><th>希望部署</th><th>登録日時</th><th>部署・権限を指定して承認</th><th></th></tr>
         ${pending.map((u) => `<tr>
           <td>${esc(u.display_name)}</td>
           <td>${esc(u.email || '')}</td>
@@ -1614,6 +1614,10 @@ function renderUsers(el, d) {
           <td>
             <select data-approve-dept="${u.id}">
               ${d.departments.map((dp) => `<option value="${dp.id}">${esc(dp.name)}</option>`).join('')}
+            </select>
+            <select data-approve-role="${u.id}" aria-label="承認時の権限">
+              <option value="user">一般</option>
+              <option value="admin">管理者</option>
             </select>
             <button class="btn-primary" style="padding:6px 14px;font-size:13px" data-approve="${u.id}">承認</button>
           </td>
@@ -1663,8 +1667,9 @@ function renderUsers(el, d) {
     b.onclick = async () => {
       const id = b.dataset.approve;
       const deptId = Number(el.querySelector(`[data-approve-dept="${id}"]`).value);
+      const role = el.querySelector(`[data-approve-role="${id}"]`).value;
       await api(`/api/admin/users/${id}`, {
-        method: 'PATCH', body: { status: 'active', department_id: deptId },
+        method: 'PATCH', body: { status: 'active', department_id: deptId, role },
       });
       renderAdmin();
     };
