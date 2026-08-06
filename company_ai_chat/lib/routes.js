@@ -7,6 +7,7 @@ const path = require('node:path');
 const { db, hashPassword, currentMonth, DEFAULT_TEMPLATES } = require('./db');
 const auth = require('./auth');
 const openai = require('./openai');
+const storage = require('./storage');
 const pop = require('./pop');
 const docs = require('./docs');
 const google = require('./google_auth');
@@ -23,19 +24,19 @@ const PERIOD_DAYS = 3;
 const PERIOD_COUNT = 10;
 const MAX_ADVANCE_PER_MONTH = 3; // 「前倒しで使う」の月間上限回数
 
-function monthCostJpy(departmentId) {
-  const row = db.prepare(`
+async function monthCostJpy(departmentId) {
+  const row = await db.prepare(`
     SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
     WHERE department_id = ? AND strftime('%Y-%m', created_at) = ?
   `).get(departmentId, currentMonth());
   return row.c;
 }
 
-function userMonthCostJpy(userId, month) {
-  return db.prepare(`
+async function userMonthCostJpy(userId, month) {
+  return (await db.prepare(`
     SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
     WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
-  `).get(userId, month).c;
+  `).get(userId, month)).c;
 }
 
 // 当日が月内のどの3日間期間(0-9番目)に属するかを求める。
@@ -62,8 +63,8 @@ function periodInfo(now = new Date()) {
   };
 }
 
-function periodCostJpy(departmentId, info) {
-  const row = db.prepare(`
+async function periodCostJpy(departmentId, info) {
+  const row = await db.prepare(`
     SELECT COALESCE(SUM(cost_jpy), 0) AS c FROM usage_log
     WHERE department_id = ? AND strftime('%Y-%m', created_at) = ?
       AND CAST(strftime('%d', created_at) AS INTEGER) BETWEEN ? AND ?
@@ -71,9 +72,9 @@ function periodCostJpy(departmentId, info) {
   return row.c;
 }
 
-function deptStatus(dept) {
+async function deptStatus(dept) {
   const info = periodInfo();
-  const used = monthCostJpy(dept.id);
+  const used = await monthCostJpy(dept.id);
   const periodBudget = dept.monthly_budget_jpy / PERIOD_COUNT;
   // 前倒し分は当月内でのみ有効(月が変われば0に戻る)
   const advanceUsed = dept.advance_month === info.monthKey ? dept.advance_used : 0;
@@ -95,7 +96,7 @@ function deptStatus(dept) {
     period_number: info.periodsElapsed,
     period_total: PERIOD_COUNT,
     period_budget_jpy: periodBudget,
-    period_used_jpy: periodCostJpy(dept.id, info),
+    period_used_jpy: await periodCostJpy(dept.id, info),
     next_period_label: info.nextPeriodLabel,
     advance_used: advanceUsed,
     advance_remaining: Math.max(0, MAX_ADVANCE_PER_MONTH - advanceUsed),
@@ -103,26 +104,28 @@ function deptStatus(dept) {
   };
 }
 
-function getUserDept(user) {
+async function getUserDept(user) {
   if (!user.department_id) return null;
-  const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(user.department_id);
+  const dept = await db.prepare('SELECT * FROM departments WHERE id = ?').get(user.department_id);
   return dept ? deptStatus(dept) : null;
 }
 
 // ---- テンプレート(ユーザーごとの個人管理) ----
 
 // 初めてテンプレートを開くユーザーに、個人用の初期セットを複製する
-function seedUserTemplatesIfEmpty(userId) {
-  const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(userId).n;
+async function seedUserTemplatesIfEmpty(userId) {
+  const count = (await db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(userId)).n;
   if (count > 0) return;
   const insert = db.prepare('INSERT INTO prompt_templates (user_id, label, prompt, position) VALUES (?, ?, ?, ?)');
-  DEFAULT_TEMPLATES.forEach((t, i) => insert.run(userId, t.label, t.prompt, i));
+  for (const [i, t] of DEFAULT_TEMPLATES.entries()) {
+    await insert.run(userId, t.label, t.prompt, i);
+  }
 }
 
 // ---- 私的利用の集計・警告 ----
 
-function privateStats(userId, month) {
-  const rows = db.prepare(`
+async function privateStats(userId, month) {
+  const rows = await db.prepare(`
     SELECT label, COUNT(*) AS n FROM classifications
     WHERE user_id = ? AND strftime('%Y-%m', created_at) = ?
     GROUP BY label
@@ -134,15 +137,15 @@ function privateStats(userId, month) {
 }
 
 // 分類のたびに呼ぶ。閾値超過なら同月1回だけ自動警告を作成する。
-function maybeWarnPrivateUsage(user) {
+async function maybeWarnPrivateUsage(user) {
   const month = currentMonth();
-  const stats = privateStats(user.id, month);
+  const stats = await privateStats(user.id, month);
   if (stats.judged < PRIVATE_MIN_COUNT || stats.private_ratio < PRIVATE_RATIO_WARN) return;
-  const exists = db.prepare(
+  const exists = await db.prepare(
     "SELECT 1 FROM warnings WHERE user_id = ? AND type = 'private_ratio' AND month = ?"
   ).get(user.id, month);
   if (exists) return;
-  db.prepare('INSERT INTO warnings (user_id, type, message, month) VALUES (?, ?, ?, ?)').run(
+  await db.prepare('INSERT INTO warnings (user_id, type, message, month) VALUES (?, ?, ?, ?)').run(
     user.id,
     'private_ratio',
     `今月の利用のうち私的利用と判定された割合が ${Math.round(stats.private_ratio * 100)}% に達しています。` +
@@ -184,8 +187,8 @@ async function readBody(req, maxBytes = 1_000_000) {
   }
 }
 
-function requireUser(req, res) {
-  const user = auth.getUser(req);
+async function requireUser(req, res) {
+  const user = await auth.getUser(req);
   if (!user) {
     json(res, 401, { error: 'ログインしてください' });
     return null;
@@ -193,8 +196,8 @@ function requireUser(req, res) {
   return user;
 }
 
-function requireAdmin(req, res) {
-  const user = requireUser(req, res);
+async function requireAdmin(req, res) {
+  const user = await requireUser(req, res);
   if (!user) return null;
   if (user.role !== 'admin') {
     json(res, 403, { error: '管理者権限が必要です' });
@@ -206,7 +209,7 @@ function requireAdmin(req, res) {
 // ---- メール通知 ----
 
 async function notifyAdminsOfNewApplication(user) {
-  const admins = db.prepare(
+  const admins = await db.prepare(
     "SELECT email FROM users WHERE role = 'admin' AND status = 'active' AND disabled = 0 AND email IS NOT NULL"
   ).all();
   const url = process.env.BASE_URL || '';
@@ -261,22 +264,22 @@ async function handleGoogleCallback(req, res, url) {
     const profile = await google.exchangeCode(code);
 
     // google_sub → email の順で既存ユーザーを探し、なければ承認待ちで新規作成
-    let user = db.prepare('SELECT * FROM users WHERE google_sub = ?').get(profile.sub);
+    let user = await db.prepare('SELECT * FROM users WHERE google_sub = ?').get(profile.sub);
     if (!user) {
-      user = db.prepare('SELECT * FROM users WHERE email = ? OR username = ?').get(profile.email, profile.email);
-      if (user) db.prepare('UPDATE users SET google_sub = ?, email = ? WHERE id = ?').run(profile.sub, profile.email, user.id);
+      user = await db.prepare('SELECT * FROM users WHERE email = ? OR username = ?').get(profile.email, profile.email);
+      if (user) await db.prepare('UPDATE users SET google_sub = ?, email = ? WHERE id = ?').run(profile.sub, profile.email, user.id);
     }
     if (!user) {
-      const id = db.prepare(`
+      const id = (await db.prepare(`
         INSERT INTO users (username, display_name, password_hash, role, department_id, google_sub, email, status)
         VALUES (?, ?, '', 'user', NULL, ?, ?, 'pending')
-      `).run(profile.email, profile.name, profile.sub, profile.email).lastInsertRowid;
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+      `).run(profile.email, profile.name, profile.sub, profile.email)).lastInsertRowid;
+      user = await db.prepare('SELECT * FROM users WHERE id = ?').get(id);
       console.log(`[auth] Google 新規ユーザー(承認待ち): ${profile.email}`);
     }
     if (user.disabled) return fail('このアカウントは停止されています。管理者にお問い合わせください。');
 
-    const token = auth.createSession(user.id);
+    const token = await auth.createSession(user.id);
     res.setHeader('Set-Cookie', [auth.sessionCookie(token), auth.clearOauthStateCookie()]);
     return redirect(res, '/');
   } catch (err) {
@@ -295,13 +298,13 @@ async function handle(req, res, method, pathname, url) {
   // 認証
   if (method === 'POST' && pathname === '/api/login') {
     const { username, password } = await readBody(req);
-    const result = auth.login(String(username || ''), String(password || ''));
+    const result = await auth.login(String(username || ''), String(password || ''));
     if (!result) return json(res, 401, { error: 'ユーザー名またはパスワードが違います' });
     res.setHeader('Set-Cookie', auth.sessionCookie(result.token));
     return json(res, 200, { ok: true });
   }
   if (method === 'POST' && pathname === '/api/logout') {
-    auth.logout(auth.parseCookies(req).session);
+    await auth.logout(auth.parseCookies(req).session);
     res.setHeader('Set-Cookie', auth.clearCookie());
     return json(res, 200, { ok: true });
   }
@@ -316,18 +319,18 @@ async function handle(req, res, method, pathname, url) {
   // ここから先は要ログイン
   if (pathname.startsWith('/api/admin/')) return handleAdmin(req, res, method, pathname);
 
-  const user = requireUser(req, res);
+  const user = await requireUser(req, res);
   if (!user) return true;
 
   // 定型文テンプレート(ユーザーごとに個人管理、最少1件・最大5件)
   if (method === 'GET' && pathname === '/api/templates') {
-    seedUserTemplatesIfEmpty(user.id);
-    const rows = db.prepare('SELECT id, label, prompt FROM prompt_templates WHERE user_id = ? ORDER BY position, id').all(user.id);
+    await seedUserTemplatesIfEmpty(user.id);
+    const rows = await db.prepare('SELECT id, label, prompt FROM prompt_templates WHERE user_id = ? ORDER BY position, id').all(user.id);
     return json(res, 200, rows);
   }
 
   if (method === 'POST' && pathname === '/api/templates') {
-    const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(user.id).n;
+    const count = (await db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(user.id)).n;
     if (count >= TEMPLATE_MAX) {
       return json(res, 400, { error: `テンプレートは最大${TEMPLATE_MAX}個までです` });
     }
@@ -335,59 +338,59 @@ async function handle(req, res, method, pathname, url) {
     if (!String(label || '').trim() || !String(prompt || '').trim()) {
       return json(res, 400, { error: 'ラベルと内容を入力してください' });
     }
-    const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM prompt_templates WHERE user_id = ?').get(user.id).p;
-    const id = db.prepare('INSERT INTO prompt_templates (user_id, label, prompt, position) VALUES (?, ?, ?, ?)')
-      .run(user.id, String(label).trim(), String(prompt).trim(), maxPos + 1).lastInsertRowid;
+    const maxPos = (await db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM prompt_templates WHERE user_id = ?').get(user.id)).p;
+    const id = (await db.prepare('INSERT INTO prompt_templates (user_id, label, prompt, position) VALUES (?, ?, ?, ?)')
+      .run(user.id, String(label).trim(), String(prompt).trim(), maxPos + 1)).lastInsertRowid;
     return json(res, 200, { id });
   }
 
   const templateDupMatch = pathname.match(/^\/api\/templates\/(\d+)\/duplicate$/);
   if (method === 'POST' && templateDupMatch) {
-    const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(user.id).n;
+    const count = (await db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(user.id)).n;
     if (count >= TEMPLATE_MAX) {
       return json(res, 400, { error: `テンプレートは最大${TEMPLATE_MAX}個までです` });
     }
-    const src = db.prepare('SELECT * FROM prompt_templates WHERE id = ? AND user_id = ?').get(Number(templateDupMatch[1]), user.id);
+    const src = await db.prepare('SELECT * FROM prompt_templates WHERE id = ? AND user_id = ?').get(Number(templateDupMatch[1]), user.id);
     if (!src) return json(res, 404, { error: 'テンプレートが見つかりません' });
-    const maxPos = db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM prompt_templates WHERE user_id = ?').get(user.id).p;
-    const id = db.prepare('INSERT INTO prompt_templates (user_id, label, prompt, position) VALUES (?, ?, ?, ?)')
-      .run(user.id, `${src.label}のコピー`, src.prompt, maxPos + 1).lastInsertRowid;
+    const maxPos = (await db.prepare('SELECT COALESCE(MAX(position), -1) AS p FROM prompt_templates WHERE user_id = ?').get(user.id)).p;
+    const id = (await db.prepare('INSERT INTO prompt_templates (user_id, label, prompt, position) VALUES (?, ?, ?, ?)')
+      .run(user.id, `${src.label}のコピー`, src.prompt, maxPos + 1)).lastInsertRowid;
     return json(res, 200, { id });
   }
 
   const templateMatch = pathname.match(/^\/api\/templates\/(\d+)$/);
   if (method === 'PATCH' && templateMatch) {
     const id = Number(templateMatch[1]);
-    const existing = db.prepare('SELECT * FROM prompt_templates WHERE id = ? AND user_id = ?').get(id, user.id);
+    const existing = await db.prepare('SELECT * FROM prompt_templates WHERE id = ? AND user_id = ?').get(id, user.id);
     if (!existing) return json(res, 404, { error: 'テンプレートが見つかりません' });
     const { label, prompt } = await readBody(req);
     if (!String(label || '').trim() || !String(prompt || '').trim()) {
       return json(res, 400, { error: 'ラベルと内容を入力してください' });
     }
-    db.prepare("UPDATE prompt_templates SET label = ?, prompt = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
+    await db.prepare("UPDATE prompt_templates SET label = ?, prompt = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
       .run(String(label).trim(), String(prompt).trim(), id);
     return json(res, 200, { ok: true });
   }
 
   if (method === 'DELETE' && templateMatch) {
     const id = Number(templateMatch[1]);
-    const existing = db.prepare('SELECT * FROM prompt_templates WHERE id = ? AND user_id = ?').get(id, user.id);
+    const existing = await db.prepare('SELECT * FROM prompt_templates WHERE id = ? AND user_id = ?').get(id, user.id);
     if (!existing) return json(res, 404, { error: 'テンプレートが見つかりません' });
-    const count = db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(user.id).n;
+    const count = (await db.prepare('SELECT COUNT(*) AS n FROM prompt_templates WHERE user_id = ?').get(user.id)).n;
     if (count <= TEMPLATE_MIN) {
       return json(res, 400, { error: `テンプレートは最低${TEMPLATE_MIN}個は必要です` });
     }
-    db.prepare('DELETE FROM prompt_templates WHERE id = ?').run(id);
+    await db.prepare('DELETE FROM prompt_templates WHERE id = ?').run(id);
     return json(res, 200, { ok: true });
   }
 
   if (method === 'GET' && pathname === '/api/me') {
-    const dept = getUserDept(user);
-    const warnings = db.prepare(
+    const dept = await getUserDept(user);
+    const warnings = await db.prepare(
       'SELECT id, type, message, created_at FROM warnings WHERE user_id = ? AND acknowledged = 0 ORDER BY id DESC'
     ).all(user.id);
-    const stats = privateStats(user.id, currentMonth());
-    const myCost = userMonthCostJpy(user.id, currentMonth());
+    const stats = await privateStats(user.id, currentMonth());
+    const myCost = await userMonthCostJpy(user.id, currentMonth());
     return json(res, 200, {
       user: {
         id: user.id, username: user.username, display_name: user.display_name,
@@ -411,16 +414,16 @@ async function handle(req, res, method, pathname, url) {
     if (!requestedName || !requestedDept) {
       return json(res, 400, { error: '氏名と希望部署を入力してください' });
     }
-    db.prepare('UPDATE users SET requested_name = ?, requested_department = ? WHERE id = ?')
+    await db.prepare('UPDATE users SET requested_name = ?, requested_department = ? WHERE id = ?')
       .run(requestedName, requestedDept, user.id);
-    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    const updated = await db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     notifyAdminsOfNewApplication(updated).catch((err) => console.error('[mailer]', err.message));
     return json(res, 200, { ok: true });
   }
 
   if (method === 'POST' && pathname.startsWith('/api/warnings/') && pathname.endsWith('/ack')) {
     const id = Number(pathname.split('/')[3]);
-    db.prepare('UPDATE warnings SET acknowledged = 1 WHERE id = ? AND user_id = ?').run(id, user.id);
+    await db.prepare('UPDATE warnings SET acknowledged = 1 WHERE id = ? AND user_id = ?').run(id, user.id);
     return json(res, 200, { ok: true });
   }
 
@@ -432,7 +435,7 @@ async function handle(req, res, method, pathname, url) {
   // 次の期間の予算枠を先取りする「前倒しで使う」(月3回まで)
   if (method === 'POST' && pathname === '/api/budget/advance') {
     if (!user.department_id) return json(res, 400, { error: '部署が設定されていません。' });
-    const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(user.department_id);
+    const dept = await db.prepare('SELECT * FROM departments WHERE id = ?').get(user.department_id);
     const info = periodInfo();
     const used = dept.advance_month === info.monthKey ? dept.advance_used : 0;
     if (used >= MAX_ADVANCE_PER_MONTH) {
@@ -441,46 +444,46 @@ async function handle(req, res, method, pathname, url) {
     if (info.periodsElapsed + used >= PERIOD_COUNT) {
       return json(res, 400, { error: '今月分の予算枠はすでにすべて利用可能です。' });
     }
-    db.prepare('UPDATE departments SET advance_used = ?, advance_month = ? WHERE id = ?')
+    await db.prepare('UPDATE departments SET advance_used = ?, advance_month = ? WHERE id = ?')
       .run(used + 1, info.monthKey, user.department_id);
-    return json(res, 200, { department: getUserDept(user) });
+    return json(res, 200, { department: await getUserDept(user) });
   }
 
   // プロジェクト(チャットのフォルダ分け)
   if (method === 'GET' && pathname === '/api/projects') {
-    const rows = db.prepare('SELECT id, name FROM projects WHERE user_id = ? ORDER BY id').all(user.id);
+    const rows = await db.prepare('SELECT id, name FROM projects WHERE user_id = ? ORDER BY id').all(user.id);
     return json(res, 200, rows);
   }
   if (method === 'POST' && pathname === '/api/projects') {
     const { name } = await readBody(req);
     const trimmed = String(name || '').trim().slice(0, 40);
     if (!trimmed) return json(res, 400, { error: 'プロジェクト名を入力してください' });
-    const id = db.prepare('INSERT INTO projects (user_id, name) VALUES (?, ?)').run(user.id, trimmed).lastInsertRowid;
+    const id = (await db.prepare('INSERT INTO projects (user_id, name) VALUES (?, ?)').run(user.id, trimmed)).lastInsertRowid;
     return json(res, 200, { id });
   }
   const projectMatch = pathname.match(/^\/api\/projects\/(\d+)$/);
   if (projectMatch) {
     const projId = Number(projectMatch[1]);
-    const proj = db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(projId, user.id);
+    const proj = await db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(projId, user.id);
     if (!proj) return json(res, 404, { error: 'プロジェクトが見つかりません' });
     if (method === 'PATCH') {
       const { name } = await readBody(req);
       const trimmed = String(name || '').trim().slice(0, 40);
       if (!trimmed) return json(res, 400, { error: 'プロジェクト名を入力してください' });
-      db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(trimmed, projId);
+      await db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(trimmed, projId);
       return json(res, 200, { ok: true });
     }
     if (method === 'DELETE') {
       // 中のチャットは削除せず、プロジェクト未所属に戻す
-      db.prepare('UPDATE conversations SET project_id = NULL WHERE project_id = ?').run(projId);
-      db.prepare('DELETE FROM projects WHERE id = ?').run(projId);
+      await db.prepare('UPDATE conversations SET project_id = NULL WHERE project_id = ?').run(projId);
+      await db.prepare('DELETE FROM projects WHERE id = ?').run(projId);
       return json(res, 200, { ok: true });
     }
   }
 
   // 会話
   if (method === 'GET' && pathname === '/api/conversations') {
-    const rows = db.prepare(
+    const rows = await db.prepare(
       'SELECT id, title, updated_at, pinned, archived, project_id FROM conversations WHERE user_id = ? ORDER BY pinned DESC, updated_at DESC'
     ).all(user.id);
     return json(res, 200, rows);
@@ -489,20 +492,20 @@ async function handle(req, res, method, pathname, url) {
     const { project_id } = await readBody(req);
     let projId = null;
     if (project_id) {
-      const proj = db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(Number(project_id), user.id);
+      const proj = await db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(Number(project_id), user.id);
       if (proj) projId = proj.id;
     }
-    const id = db.prepare('INSERT INTO conversations (user_id, project_id) VALUES (?, ?)').run(user.id, projId).lastInsertRowid;
+    const id = (await db.prepare('INSERT INTO conversations (user_id, project_id) VALUES (?, ?)').run(user.id, projId)).lastInsertRowid;
     return json(res, 200, { id });
   }
 
   const convMatch = pathname.match(/^\/api\/conversations\/(\d+)(\/messages)?$/);
   if (convMatch) {
     const convId = Number(convMatch[1]);
-    const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(convId, user.id);
+    const conv = await db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(convId, user.id);
     if (!conv) return json(res, 404, { error: '会話が見つかりません' });
     if (method === 'GET' && convMatch[2]) {
-      const rows = db.prepare(
+      const rows = await db.prepare(
         'SELECT id, role, content, model, created_at FROM messages WHERE conversation_id = ? ORDER BY id'
       ).all(convId);
       return json(res, 200, rows);
@@ -513,36 +516,36 @@ async function handle(req, res, method, pathname, url) {
       if (body.title !== undefined) {
         const title = String(body.title).trim().slice(0, 60);
         if (!title) return json(res, 400, { error: 'タイトルを入力してください' });
-        db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title, convId);
+        await db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(title, convId);
       }
       if (body.pinned !== undefined) {
-        db.prepare('UPDATE conversations SET pinned = ? WHERE id = ?').run(body.pinned ? 1 : 0, convId);
+        await db.prepare('UPDATE conversations SET pinned = ? WHERE id = ?').run(body.pinned ? 1 : 0, convId);
       }
       if (body.archived !== undefined) {
-        db.prepare('UPDATE conversations SET archived = ? WHERE id = ?').run(body.archived ? 1 : 0, convId);
+        await db.prepare('UPDATE conversations SET archived = ? WHERE id = ?').run(body.archived ? 1 : 0, convId);
       }
       if (body.project_id !== undefined) {
         if (body.project_id === null) {
-          db.prepare('UPDATE conversations SET project_id = NULL WHERE id = ?').run(convId);
+          await db.prepare('UPDATE conversations SET project_id = NULL WHERE id = ?').run(convId);
         } else {
-          const proj = db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(Number(body.project_id), user.id);
+          const proj = await db.prepare('SELECT id FROM projects WHERE id = ? AND user_id = ?').get(Number(body.project_id), user.id);
           if (!proj) return json(res, 404, { error: 'プロジェクトが見つかりません' });
-          db.prepare('UPDATE conversations SET project_id = ? WHERE id = ?').run(proj.id, convId);
+          await db.prepare('UPDATE conversations SET project_id = ? WHERE id = ?').run(proj.id, convId);
         }
       }
       return json(res, 200, { ok: true });
     }
     if (method === 'DELETE' && !convMatch[2]) {
       // 会話内の生成画像・添付画像ファイルも一緒に削除する(孤児ファイル防止)
-      const imageRows = db.prepare(
+      const imageRows = await db.prepare(
         "SELECT content FROM messages WHERE conversation_id = ? AND content LIKE '%/api/files/%'"
       ).all(convId);
       for (const row of imageRows) {
         for (const m of row.content.matchAll(/\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg|jpg|jpeg|webp|gif))/g)) {
-          try { fs.unlinkSync(path.join(openai.IMAGES_DIR, m[1])); } catch { /* 既に無ければ無視 */ }
+          await storage.remove(m[1]);
         }
       }
-      db.prepare('DELETE FROM conversations WHERE id = ?').run(convId);
+      await db.prepare('DELETE FROM conversations WHERE id = ?').run(convId);
       return json(res, 200, { ok: true });
     }
   }
@@ -566,7 +569,7 @@ async function handle(req, res, method, pathname, url) {
     if (buf.length === 0) return json(res, 400, { error: 'ファイルの読み込みに失敗しました' });
     if (buf.length > 8_000_000) return json(res, 400, { error: 'ファイルサイズは8MBまでです' });
     const file = `${crypto.randomBytes(12).toString('hex')}.${ext === 'jpeg' ? 'jpg' : ext}`;
-    await fs.promises.writeFile(path.join(openai.IMAGES_DIR, file), buf);
+    await storage.put(file, buf, `image/${ext === 'jpg' ? 'jpeg' : ext}`);
     return json(res, 200, { url: `/api/files/${file}` });
   }
 
@@ -602,7 +605,7 @@ async function handle(req, res, method, pathname, url) {
   // 元になる商品画像は「写真から」(AIで切り抜き・明るさ補正)か「新規作成」(AIで一から生成)を選べる。
   if (method === 'POST' && pathname === '/api/pop') {
     const body = await readBody(req);
-    const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
+    const conv = await db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
       .get(Number(body.conversation_id), user.id);
     if (!conv) return json(res, 404, { error: '会話が見つかりません' });
 
@@ -614,7 +617,7 @@ async function handle(req, res, method, pathname, url) {
     const mode = body.mode === 'generate' ? 'generate' : 'photo';
 
     // 写真の加工・新規生成はAI利用のためコストが発生する。予算ロック中は実行しない。
-    const dept = getUserDept(user);
+    const dept = await getUserDept(user);
     if (!dept) return json(res, 400, { error: '部署が設定されていません。管理者に連絡してください。' });
     if (dept.locked) {
       return json(res, 403, {
@@ -631,7 +634,7 @@ async function handle(req, res, method, pathname, url) {
         if (!photoMatch) return json(res, 400, { error: '商品写真をアップロードしてください' });
         let photoBuffer;
         try {
-          photoBuffer = await fs.promises.readFile(path.join(openai.IMAGES_DIR, photoMatch[1]));
+          photoBuffer = await storage.get(photoMatch[1]);
         } catch {
           return json(res, 400, { error: '写真の読み込みに失敗しました。もう一度アップロードしてください' });
         }
@@ -646,37 +649,36 @@ async function handle(req, res, method, pathname, url) {
       console.error('[pop]', err);
       return json(res, 400, { error: '画像の作成に失敗しました。時間をおいて再度お試しください' });
     }
-    const productBuffer = await fs.promises.readFile(path.join(openai.IMAGES_DIR, result.file));
+    const productBuffer = await storage.get(result.file);
     const productMime = FILE_MIME[result.file.split('.').pop()];
     const { model: aiModel, costJpy: aiCostJpy } = result;
 
     const svg = pop.buildPopSvg({ photoBuffer: productBuffer, photoMime: productMime, headline, price, color, aspect });
     const file = `${crypto.randomBytes(12).toString('hex')}.svg`;
-    await fs.promises.writeFile(path.join(openai.IMAGES_DIR, file), svg);
+    await storage.put(file, svg, 'image/svg+xml');
 
-    db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
+    await db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)')
       .run(conv.id, 'user', `POP作成(${mode === 'photo' ? '写真から' : '新規作成'}): 見出し「${headline}」/ 価格「${price}」`);
-    const msgCount = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id).n;
+    const msgCount = (await db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id)).n;
     if (msgCount === 1) {
-      db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(`POP: ${headline}`.slice(0, 30), conv.id);
+      await db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(`POP: ${headline}`.slice(0, 30), conv.id);
     }
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
       VALUES (?, ?, ?, 'chat', 0, 0, ?)
     `).run(user.id, user.department_id, aiModel, aiCostJpy);
-    db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
+    await db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
       .run(conv.id, 'assistant', `![POP](/api/files/${file})`, 'pop-tool');
-    db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
+    await db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
     return json(res, 200, { ok: true, url: `/api/files/${file}` });
   }
 
   // 生成画像・添付画像の配信(ログイン必須、ファイル名はランダムhexのみ許可)
   const fileMatch = pathname.match(/^\/api\/files\/([a-f0-9]{16,32}\.(?:png|svg|jpg|jpeg|webp|gif))$/);
   if (method === 'GET' && fileMatch) {
-    const filePath = path.join(openai.IMAGES_DIR, fileMatch[1]);
     let data;
     try {
-      data = await fs.promises.readFile(filePath);
+      data = await storage.get(fileMatch[1]);
     } catch {
       return json(res, 404, { error: 'not found' });
     }
@@ -701,12 +703,12 @@ async function handleChat(req, res, user) {
   const text = String(message || '').trim();
   if (!text) return json(res, 400, { error: 'メッセージが空です' });
 
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
+  const conv = await db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?')
     .get(Number(conversation_id), user.id);
   if (!conv) return json(res, 404, { error: '会話が見つかりません' });
 
   // 予算ロック確認
-  const dept = getUserDept(user);
+  const dept = await getUserDept(user);
   if (!dept) return json(res, 400, { error: '部署が設定されていません。管理者に連絡してください。' });
   if (dept.locked) {
     return json(res, 403, {
@@ -727,20 +729,20 @@ async function handleChat(req, res, user) {
   }
 
   // ユーザー発言を保存し、初回ならタイトルに反映
-  db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)').run(conv.id, 'user', text);
-  const msgCount = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id).n;
+  await db.prepare('INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)').run(conv.id, 'user', text);
+  const msgCount = (await db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?').get(conv.id)).n;
   if (msgCount === 1) {
     // タイトルには添付ファイル(画像参照・テキスト本文)を含めない
     const plain = text
       .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
       .replace(/【添付ファイル: [^】]*】\n```[\s\S]*?```/g, '')
       .trim();
-    db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run((plain || '添付ファイル').slice(0, 30), conv.id);
+    await db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run((plain || '添付ファイル').slice(0, 30), conv.id);
   }
 
-  const history = db.prepare(
+  const history = (await db.prepare(
     'SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 20'
-  ).all(conv.id).reverse();
+  ).all(conv.id)).reverse();
 
   // SSE 開始
   res.writeHead(200, {
@@ -761,20 +763,20 @@ async function handleChat(req, res, user) {
   let finished = false;
   req.on('close', () => { if (!finished) controller.abort(); });
 
-  const saveAssistant = (content, model, promptTokens, completionTokens, fixedCostJpy) => {
-    db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
+  const saveAssistant = async (content, model, promptTokens, completionTokens, fixedCostJpy) => {
+    await db.prepare('INSERT INTO messages (conversation_id, role, content, model) VALUES (?, ?, ?, ?)')
       .run(conv.id, 'assistant', content, model);
-    db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
+    await db.prepare("UPDATE conversations SET updated_at = datetime('now', 'localtime') WHERE id = ?").run(conv.id);
     const cost = fixedCostJpy !== undefined ? fixedCostJpy : openai.costJpy(model, promptTokens, completionTokens);
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
       VALUES (?, ?, ?, 'chat', ?, ?, ?)
     `).run(user.id, user.department_id, model, promptTokens, completionTokens, cost);
     return cost;
   };
 
-  const sendDone = (cost, model) => {
-    const after = getUserDept(user);
+  const sendDone = async (cost, model) => {
+    const after = await getUserDept(user);
     send('done', {
       cost_jpy: cost,
       model,
@@ -790,9 +792,9 @@ async function handleChat(req, res, user) {
       // 入力されたテキストをそのままプロンプトとしてAPIに渡す
       const img = await openai.createImage(text);
       const content = `![生成画像](/api/files/${img.file})`;
-      const cost = saveAssistant(content, img.model, 0, 0, img.costJpy);
+      const cost = await saveAssistant(content, img.model, 0, 0, img.costJpy);
       send('replace', { text: content });
-      sendDone(cost, img.model);
+      await sendDone(cost, img.model);
     } catch (err) {
       console.error('[image]', err);
       send('error', { message: '画像の生成に失敗しました。時間をおいて再度お試しください。' });
@@ -808,13 +810,13 @@ async function handleChat(req, res, user) {
       partial += delta;
       send('delta', { text: delta });
     }, route.model, controller.signal);
-    const cost = saveAssistant(result.content, result.model, result.promptTokens, result.completionTokens);
-    sendDone(cost, result.model);
+    const cost = await saveAssistant(result.content, result.model, result.promptTokens, result.completionTokens);
+    await sendDone(cost, result.model);
   } catch (err) {
     finished = true;
     // 途中まで生成された分は、停止によるものでも保存し概算トークンで予算に計上する(集計漏れ防止)
     if (partial) {
-      saveAssistant(partial, route.model,
+      await saveAssistant(partial, route.model,
         openai.estimateTokens(history), Math.ceil(partial.length / 3));
     }
     if (err.name !== 'AbortError') {
@@ -833,16 +835,16 @@ async function handleChat(req, res, user) {
 async function classifyAsync(user, text) {
   try {
     const r = await openai.classify(text);
-    db.prepare('INSERT INTO classifications (user_id, department_id, label) VALUES (?, ?, ?)')
+    await db.prepare('INSERT INTO classifications (user_id, department_id, label) VALUES (?, ?, ?)')
       .run(user.id, user.department_id, r.label);
     if (r.promptTokens || r.completionTokens) {
       const cost = openai.costJpy(r.model, r.promptTokens, r.completionTokens);
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO usage_log (user_id, department_id, model, kind, prompt_tokens, completion_tokens, cost_jpy)
         VALUES (?, ?, ?, 'classify', ?, ?, ?)
       `).run(user.id, user.department_id, r.model, r.promptTokens, r.completionTokens, cost);
     }
-    maybeWarnPrivateUsage(user);
+    await maybeWarnPrivateUsage(user);
   } catch (err) {
     console.error('[classifyAsync]', err.message);
   }
@@ -854,32 +856,40 @@ const TEMPLATE_MIN = 1;
 const TEMPLATE_MAX = 5;
 
 async function handleAdmin(req, res, method, pathname) {
-  const admin = requireAdmin(req, res);
+  const admin = await requireAdmin(req, res);
   if (!admin) return true;
 
   if (method === 'GET' && pathname === '/api/admin/overview') {
     const month = currentMonth();
-    const departments = db.prepare('SELECT * FROM departments ORDER BY id').all().map(deptStatus);
-    const users = db.prepare(`
+    const departmentRows = await db.prepare('SELECT * FROM departments ORDER BY id').all();
+    const departments = await Promise.all(departmentRows.map((dept) => deptStatus(dept)));
+    const userRows = await db.prepare(`
       SELECT u.id, u.username, u.display_name, u.role, u.disabled, u.department_id, u.created_at,
              u.email, u.status, (u.google_sub IS NOT NULL) AS is_google, d.name AS department_name,
              u.requested_name, u.requested_department
       FROM users u LEFT JOIN departments d ON d.id = u.department_id ORDER BY u.id
-    `).all().map((u) => {
-      const stats = privateStats(u.id, month);
-      const cost = userMonthCostJpy(u.id, month);
-      const warningCount = db.prepare(
+    `).all();
+    const users = await Promise.all(userRows.map(async (u) => {
+      const stats = await privateStats(u.id, month);
+      const cost = await userMonthCostJpy(u.id, month);
+      const warningCount = (await db.prepare(
         'SELECT COUNT(*) AS n FROM warnings WHERE user_id = ? AND month = ?'
-      ).get(u.id, month).n;
+      ).get(u.id, month)).n;
       return { ...u, month_cost_jpy: cost, stats, warning_count: warningCount };
-    });
-    const daily = db.prepare(`
+    }));
+    const dailySql = db.usePostgres ? `
+      SELECT DATE(created_at) AS day, COALESCE(SUM(cost_jpy), 0) AS cost
+      FROM usage_log
+      WHERE created_at >= CURRENT_DATE - INTERVAL '29 days'
+      GROUP BY day ORDER BY day
+    ` : `
       SELECT date(created_at) AS day, COALESCE(SUM(cost_jpy), 0) AS cost
       FROM usage_log
       WHERE created_at >= date('now', 'localtime', '-29 days')
       GROUP BY day ORDER BY day
-    `).all();
-    const recentWarnings = db.prepare(`
+    `;
+    const daily = await db.prepare(dailySql).all();
+    const recentWarnings = await db.prepare(`
       SELECT w.*, u.display_name FROM warnings w JOIN users u ON u.id = w.user_id
       ORDER BY w.id DESC LIMIT 50
     `).all();
@@ -894,8 +904,8 @@ async function handleAdmin(req, res, method, pathname) {
       : parseBudget(monthly_budget_jpy);
     if (budget === null) return json(res, 400, { error: '予算は0以上の数値で入力してください' });
     try {
-      const id = db.prepare('INSERT INTO departments (name, monthly_budget_jpy) VALUES (?, ?)')
-        .run(String(name), budget).lastInsertRowid;
+      const id = (await db.prepare('INSERT INTO departments (name, monthly_budget_jpy) VALUES (?, ?)')
+        .run(String(name), budget)).lastInsertRowid;
       return json(res, 200, { id });
     } catch {
       return json(res, 400, { error: '同名の部署が既に存在します' });
@@ -905,14 +915,14 @@ async function handleAdmin(req, res, method, pathname) {
   const deptMatch = pathname.match(/^\/api\/admin\/departments\/(\d+)$/);
   if (method === 'PATCH' && deptMatch) {
     const id = Number(deptMatch[1]);
-    const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
+    const dept = await db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
     if (!dept) return json(res, 404, { error: '部署が見つかりません' });
     const body = await readBody(req);
     if (body.name !== undefined) {
       const name = String(body.name).trim();
       if (!name) return json(res, 400, { error: '部署名を入力してください' });
       try {
-        db.prepare('UPDATE departments SET name = ? WHERE id = ?').run(name, id);
+        await db.prepare('UPDATE departments SET name = ? WHERE id = ?').run(name, id);
       } catch {
         return json(res, 400, { error: '同名の部署が既に存在します' });
       }
@@ -920,26 +930,26 @@ async function handleAdmin(req, res, method, pathname) {
     if (body.monthly_budget_jpy !== undefined) {
       const budget = parseBudget(body.monthly_budget_jpy);
       if (budget === null) return json(res, 400, { error: '予算は0以上の数値で入力してください' });
-      db.prepare('UPDATE departments SET monthly_budget_jpy = ? WHERE id = ?').run(budget, id);
+      await db.prepare('UPDATE departments SET monthly_budget_jpy = ? WHERE id = ?').run(budget, id);
     }
     if (body.unlock === true) {
-      db.prepare('UPDATE departments SET unlock_month = ? WHERE id = ?').run(currentMonth(), id);
+      await db.prepare('UPDATE departments SET unlock_month = ? WHERE id = ?').run(currentMonth(), id);
     }
     if (body.unlock === false) {
-      db.prepare('UPDATE departments SET unlock_month = NULL WHERE id = ?').run(id);
+      await db.prepare('UPDATE departments SET unlock_month = NULL WHERE id = ?').run(id);
     }
-    return json(res, 200, deptStatus(db.prepare('SELECT * FROM departments WHERE id = ?').get(id)));
+    return json(res, 200, await deptStatus(await db.prepare('SELECT * FROM departments WHERE id = ?').get(id)));
   }
 
   if (method === 'DELETE' && deptMatch) {
     const id = Number(deptMatch[1]);
-    const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
+    const dept = await db.prepare('SELECT * FROM departments WHERE id = ?').get(id);
     if (!dept) return json(res, 404, { error: '部署が見つかりません' });
     // 履歴データ(利用ログ・判定結果)は削除せず、所属だけ外して保持する
-    db.prepare('UPDATE users SET department_id = NULL WHERE department_id = ?').run(id);
-    db.prepare('UPDATE usage_log SET department_id = NULL WHERE department_id = ?').run(id);
-    db.prepare('UPDATE classifications SET department_id = NULL WHERE department_id = ?').run(id);
-    db.prepare('DELETE FROM departments WHERE id = ?').run(id);
+    await db.prepare('UPDATE users SET department_id = NULL WHERE department_id = ?').run(id);
+    await db.prepare('UPDATE usage_log SET department_id = NULL WHERE department_id = ?').run(id);
+    await db.prepare('UPDATE classifications SET department_id = NULL WHERE department_id = ?').run(id);
+    await db.prepare('DELETE FROM departments WHERE id = ?').run(id);
     return json(res, 200, { ok: true });
   }
 
@@ -947,7 +957,7 @@ async function handleAdmin(req, res, method, pathname) {
     const { username, display_name, password, role, department_id } = await readBody(req);
     if (!username || !password) return json(res, 400, { error: 'ユーザー名とパスワードは必須です' });
     try {
-      const id = db.prepare(`
+      const id = (await db.prepare(`
         INSERT INTO users (username, display_name, password_hash, role, department_id)
         VALUES (?, ?, ?, ?, ?)
       `).run(
@@ -956,7 +966,7 @@ async function handleAdmin(req, res, method, pathname) {
         hashPassword(String(password)),
         role === 'admin' ? 'admin' : 'user',
         Number(department_id) || null
-      ).lastInsertRowid;
+      )).lastInsertRowid;
       return json(res, 200, { id });
     } catch {
       return json(res, 400, { error: '同名のユーザーが既に存在します' });
@@ -966,47 +976,47 @@ async function handleAdmin(req, res, method, pathname) {
   const userMatch = pathname.match(/^\/api\/admin\/users\/(\d+)$/);
   if (method === 'PATCH' && userMatch) {
     const id = Number(userMatch[1]);
-    const target = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    const target = await db.prepare('SELECT * FROM users WHERE id = ?').get(id);
     if (!target) return json(res, 404, { error: 'ユーザーが見つかりません' });
     const body = await readBody(req);
     // 最後の有効な管理者を降格・停止すると誰も管理できなくなるため拒否する
     const removesAdmin = target.role === 'admin' &&
       ((body.role && body.role !== 'admin') || body.disabled === true);
     if (removesAdmin) {
-      const others = db.prepare(
+      const others = (await db.prepare(
         "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?"
-      ).get(id).n;
+      ).get(id)).n;
       if (others === 0) {
         return json(res, 400, { error: '最後の管理者を降格・停止することはできません。先に別の管理者を作成してください。' });
       }
     }
     if (body.department_id !== undefined) {
-      db.prepare('UPDATE users SET department_id = ? WHERE id = ?').run(Number(body.department_id) || null, id);
+      await db.prepare('UPDATE users SET department_id = ? WHERE id = ?').run(Number(body.department_id) || null, id);
     }
     if (body.role) {
-      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(body.role === 'admin' ? 'admin' : 'user', id);
+      await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(body.role === 'admin' ? 'admin' : 'user', id);
     }
     if (body.disabled !== undefined) {
-      db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(body.disabled ? 1 : 0, id);
-      if (body.disabled) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
+      await db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(body.disabled ? 1 : 0, id);
+      if (body.disabled) await db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
     }
     // 承認: status を active にする(通常は department_id とセットで送られる)
     if (body.status === 'active' || body.status === 'pending') {
-      db.prepare('UPDATE users SET status = ? WHERE id = ?').run(body.status, id);
+      await db.prepare('UPDATE users SET status = ? WHERE id = ?').run(body.status, id);
       if (body.status === 'active' && target.status === 'pending') {
-        const approved = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+        const approved = await db.prepare('SELECT * FROM users WHERE id = ?').get(id);
         notifyUserApproved(approved).catch((err) => console.error('[mailer]', err.message));
       }
     }
     if (body.password) {
-      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.password)), id);
+      await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(body.password)), id);
     } else if (body.password === '') {
       // 明示的な空文字はパスワードログインを無効化する(Googleログイン専用にする)
-      db.prepare("UPDATE users SET password_hash = '' WHERE id = ?").run(id);
+      await db.prepare("UPDATE users SET password_hash = '' WHERE id = ?").run(id);
     }
     if (body.email !== undefined) {
       // Googleログイン時、このメールアドレスと一致すれば既存ユーザーに自動で紐付く
-      db.prepare('UPDATE users SET email = ? WHERE id = ?').run(String(body.email) || null, id);
+      await db.prepare('UPDATE users SET email = ? WHERE id = ?').run(String(body.email) || null, id);
     }
     return json(res, 200, { ok: true });
   }
@@ -1016,7 +1026,7 @@ async function handleAdmin(req, res, method, pathname) {
   if (method === 'POST' && warnMatch) {
     const id = Number(warnMatch[1]);
     const { message } = await readBody(req);
-    db.prepare('INSERT INTO warnings (user_id, type, message, month) VALUES (?, ?, ?, ?)').run(
+    await db.prepare('INSERT INTO warnings (user_id, type, message, month) VALUES (?, ?, ?, ?)').run(
       id,
       'manual',
       String(message || '管理者から利用方法について注意があります。'),

@@ -7,6 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const fs = require('node:fs');
 const routes = require('./lib/routes');
+const { db } = require('./lib/db');
 const { MOCK, LUNA_MODEL, IMAGE_MODEL } = require('./lib/openai');
 
 const PORT = Number(process.env.PORT || 8787);
@@ -60,9 +61,14 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`社内AIチャット: http://localhost:${PORT}`);
-  console.log(MOCK
-    ? '⚠ OPENAI_API_KEY が未設定のためモックモードで起動しました(応答はダミーです)'
-    : `モデル: 相談=${LUNA_MODEL} / 画像=${IMAGE_MODEL}`);
+db.ready.then(() => {
+  server.listen(PORT, () => {
+    console.log(`社内AIチャット: http://localhost:${PORT}`);
+    console.log(MOCK
+      ? '⚠ OPENAI_API_KEY が未設定のためモックモードで起動しました(応答はダミーです)'
+      : `モデル: 相談=${LUNA_MODEL} / 画像=${IMAGE_MODEL}`);
+  });
+}).catch((err) => {
+  console.error('[db] initialization failed', err);
+  process.exitCode = 1;
 });
