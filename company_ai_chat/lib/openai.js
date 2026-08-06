@@ -6,10 +6,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DATA_DIR } = require('./db');
+const storage = require('./storage');
 
 const API_KEY = process.env.OPENAI_API_KEY || '';
 const API_BASE = process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
 const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL || 'gpt-4o-mini';
+// テキスト相談で使うモデル。GPT-5.6 Lunaを固定し、画面からのモデル選択に依存しない。
+const LUNA_MODEL = process.env.LUNA_MODEL || 'gpt-5.6-luna';
 const USD_JPY = Number(process.env.USD_JPY || 150);
 const MOCK = !API_KEY;
 
@@ -19,11 +22,12 @@ const HEAVY_MODEL = process.env.ROUTER_HEAVY_MODEL || 'gpt-5';        // 高度�
 const IMAGE_MODEL = process.env.IMAGE_MODEL || 'gpt-image-1';         // 画像生成用
 const IMAGE_COST_JPY = Number(process.env.IMAGE_COST_JPY || 6);       // 画像1枚の概算コスト(円)
 
-const IMAGES_DIR = path.join(DATA_DIR, 'images');
+const IMAGES_DIR = storage.IMAGES_DIR;
 fs.mkdirSync(IMAGES_DIR, { recursive: true });
 
 // USD / 100万トークン。必要に応じて追記する。
 const PRICING = {
+  'gpt-5.6-luna': { input: 1, output: 6 },
   'gpt-5':         { input: 1.25, output: 10 },
   'gpt-5-mini':    { input: 0.25, output: 2 },
   'gpt-5-nano':    { input: 0.05, output: 0.4 },
@@ -51,13 +55,13 @@ const ATTACHED_IMG_RE = /!\[[^\]]*\]\((\/api\/files\/[a-f0-9]{16,32}\.(?:png|jpg
 const ATTACH_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
 
 // テキスト中の添付画像参照から実ファイルを読み込む(コスト対策で1メッセージ4枚まで)
-function readAttachedImages(text) {
+async function readAttachedImages(text) {
   const refs = [...String(text).matchAll(ATTACHED_IMG_RE)];
   const files = [];
   for (const r of refs.slice(0, 4)) {
     const name = r[1].split('/').pop();
     try {
-      const buffer = fs.readFileSync(path.join(IMAGES_DIR, name));
+      const buffer = await storage.get(name);
       files.push({ buffer, mime: ATTACH_MIME[name.split('.').pop()], name });
     } catch { /* ファイルが消えていたら無視 */ }
   }
@@ -65,10 +69,10 @@ function readAttachedImages(text) {
 }
 
 // 添付画像を含むユーザー発言を、OpenAIのマルチモーダル形式(text + image_url)に変換する。
-function toApiMessages(history) {
-  return history.map((m) => {
+async function toApiMessages(history) {
+  return Promise.all(history.map(async (m) => {
     if (m.role !== 'user' || !String(m.content).includes('/api/files/')) return m;
-    const images = readAttachedImages(m.content);
+    const images = await readAttachedImages(m.content);
     if (images.length === 0) return m;
     const parts = [];
     const text = String(m.content).replace(ATTACHED_IMG_RE, '').trim();
@@ -77,7 +81,7 @@ function toApiMessages(history) {
       parts.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.buffer.toString('base64')}` } });
     }
     return { role: 'user', content: parts };
-  });
+  }));
 }
 
 // チャット補完をストリーミングで実行する。
@@ -93,7 +97,7 @@ async function streamChat(history, onDelta, model = LIGHT_MODEL, signal) {
     },
     body: JSON.stringify({
       model,
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...toApiMessages(history)],
+      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...await toApiMessages(history)],
       stream: true,
       stream_options: { include_usage: true },
     }),
@@ -177,12 +181,12 @@ async function saveImageFromResponse(json) {
     throw new Error('no image in response');
   }
   const file = `${crypto.randomBytes(12).toString('hex')}.png`;
-  fs.writeFileSync(path.join(IMAGES_DIR, file), buf);
+  await storage.put(file, buf, 'image/png');
   return file;
 }
 
 async function generateImage(prompt) {
-  if (MOCK) return mockImage(prompt);
+  if (MOCK) return await mockImage(prompt);
   // 入力されたテキストをそのままプロンプトとしてAPIに渡す
   const res = await fetch(`${API_BASE}/images/generations`, {
     method: 'POST',
@@ -200,7 +204,7 @@ async function generateImage(prompt) {
 // 添付された写真を実際に読み込ませて編集・合成する(images/generations はテキストのみで
 // 写真を渡せないため、写真ありの場合は images/edits を使う)
 async function editImage(prompt, attachedImages) {
-  if (MOCK) return mockImage(prompt);
+  if (MOCK) return await mockImage(prompt);
   const form = new FormData();
   form.append('model', IMAGE_MODEL);
   form.append('prompt', truncatePrompt(prompt));
@@ -224,7 +228,7 @@ async function editImage(prompt, attachedImages) {
 // 画像生成の窓口: 添付写真があれば images/edits(写真を実際に読み込ませる)、
 // なければ images/generations(テキストのみ)を自動で使い分ける。
 async function createImage(prompt) {
-  const attached = readAttachedImages(prompt);
+  const attached = await readAttachedImages(prompt);
   const cleanPrompt = attached.length ? String(prompt).replace(ATTACHED_IMG_RE, '').trim() : prompt;
   return attached.length ? editImage(cleanPrompt, attached) : generateImage(cleanPrompt);
 }
@@ -294,7 +298,7 @@ async function mockStream(history, onDelta, model = LIGHT_MODEL, signal) {
   };
 }
 
-function mockImage(prompt) {
+async function mockImage(prompt) {
   const file = `${crypto.randomBytes(12).toString('hex')}.svg`;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
     <rect width="512" height="512" fill="#86b6ef"/>
@@ -302,7 +306,7 @@ function mockImage(prompt) {
     <text x="256" y="280" font-size="16" text-anchor="middle" fill="#104281" font-family="sans-serif">${
       prompt.slice(0, 24).replace(/[<>&"]/g, '')}</text>
   </svg>`;
-  fs.writeFileSync(path.join(IMAGES_DIR, file), svg);
+  await storage.put(file, svg, 'image/svg+xml');
   return { file, model: 'mock-image', costJpy: 0 };
 }
 
@@ -314,5 +318,5 @@ function mockClassify(text) {
 
 module.exports = {
   streamChat, classify, costJpy, estimateTokens, createImage, generateImage, editImage,
-  CLASSIFIER_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
+  CLASSIFIER_MODEL, LUNA_MODEL, LIGHT_MODEL, HEAVY_MODEL, IMAGE_MODEL, IMAGES_DIR, MOCK, USD_JPY,
 };

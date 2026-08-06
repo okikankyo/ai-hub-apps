@@ -22,36 +22,36 @@ function parseCookies(req) {
   return out;
 }
 
-function createSession(userId) {
+async function createSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_TTL_HOURS * 3600 * 1000).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
+  await db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
   return token;
 }
 
-function login(username, password) {
-  const user = db.prepare('SELECT * FROM users WHERE username = ? AND disabled = 0').get(username);
+async function login(username, password) {
+  const user = await db.prepare('SELECT * FROM users WHERE username = ? AND disabled = 0').get(username);
   // password_hash が空のユーザー(Google ログイン専用)はパスワードでは入れない
   if (!user || !user.password_hash || !verifyPassword(password, user.password_hash)) return null;
-  return { token: createSession(user.id), user };
+  return { token: await createSession(user.id), user };
 }
 
-function logout(token) {
-  if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+async function logout(token) {
+  if (token) await db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
 }
 
 // リクエストからログイン中ユーザーを取得。未ログインなら null。
-function getUser(req) {
+async function getUser(req) {
   const token = parseCookies(req).session;
   if (!token) return null;
-  const row = db.prepare(`
+  const row = await db.prepare(`
     SELECT u.*, s.token AS session_token, s.expires_at
     FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND u.disabled = 0
   `).get(token);
   if (!row) return null;
   if (new Date(row.expires_at) < new Date()) {
-    logout(token);
+    await logout(token);
     return null;
   }
   return row;
