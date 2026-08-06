@@ -249,7 +249,7 @@ function handleGoogleStart(req, res) {
   if (!google.ENABLED) {
     return redirect(res, '/?login_error=' + encodeURIComponent('Googleログインが未設定です(GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET)'));
   }
-  const state = crypto.randomBytes(16).toString('hex');
+  const state = google.createState();
   return redirect(res, google.authUrl(state), auth.oauthStateCookie(state));
 }
 
@@ -258,7 +258,7 @@ async function handleGoogleCallback(req, res, url) {
   try {
     const state = url.searchParams.get('state');
     const code = url.searchParams.get('code');
-    if (!code || !state || state !== auth.parseCookies(req).oauth_state) {
+    if (!code || !google.verifyState(state)) {
       return fail('Googleログインに失敗しました(state不一致)。もう一度お試しください。');
     }
     const profile = await google.exchangeCode(code);

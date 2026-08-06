@@ -2,12 +2,38 @@
 // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET を設定すると有効になる。
 'use strict';
 
+const crypto = require('node:crypto');
+
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const BASE_URL = (process.env.BASE_URL || `http://localhost:${process.env.PORT || 8787}`).replace(/\/$/, '');
 const REDIRECT_URI = `${BASE_URL}/auth/google/callback`;
 
 const ENABLED = Boolean(CLIENT_ID && CLIENT_SECRET);
+
+// Cloud RunではOAuth開始とコールバックが別インスタンスに届くことがあるため、
+// stateをCookieだけに保存せず、短時間有効な署名付きstateとして検証する。
+function createState() {
+  const issuedAt = Date.now();
+  const nonce = crypto.randomBytes(24).toString('hex');
+  const payload = `${issuedAt}.${nonce}`;
+  const signature = crypto.createHmac('sha256', CLIENT_SECRET).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifyState(state, maxAgeMs = 10 * 60 * 1000) {
+  if (!state) return false;
+  const parts = state.split('.');
+  if (parts.length !== 3) return false;
+  const [issuedAtText, nonce, signature] = parts;
+  const issuedAt = Number(issuedAtText);
+  if (!Number.isFinite(issuedAt) || !nonce || !signature || Date.now() - issuedAt < 0 || Date.now() - issuedAt > maxAgeMs) return false;
+  const payload = `${issuedAtText}.${nonce}`;
+  const expected = crypto.createHmac('sha256', CLIENT_SECRET).update(payload).digest('base64url');
+  const actualBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && crypto.timingSafeEqual(actualBytes, expectedBytes);
+}
 
 function authUrl(state) {
   const params = new URLSearchParams({
@@ -51,4 +77,4 @@ async function exchangeCode(code) {
   };
 }
 
-module.exports = { ENABLED, authUrl, exchangeCode, REDIRECT_URI };
+module.exports = { ENABLED, authUrl, exchangeCode, REDIRECT_URI, createState, verifyState };
