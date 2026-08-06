@@ -1,16 +1,10 @@
 # node:sqlite を使うため Node 22.5+ が必須。
-# 依存パッケージはビルド時のnpm installを避けるため node_modules ごと
-# リポジトリに含めている(社内ネットワークのSSL検査機器等でビルドサーバーからの
-# npmレジストリ接続が失敗する環境でも問題なくビルドできるように)。
-# ネイティブバイナリ依存(ビルド環境と実行環境でOS/libcが違うと動かない)は
-# 意図的に避けている。PDF抽出に unpdf を使っているのもそのため
-# (pdf-parseは@napi-rs/canvasというネイティブ依存を必須で持つため不採用)。
 FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-COPY node_modules ./node_modules
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --omit=dev --ignore-scripts
 COPY server.js ./
 COPY lib ./lib
 COPY public ./public
